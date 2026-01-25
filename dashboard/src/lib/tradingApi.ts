@@ -212,6 +212,30 @@ class TradingApi {
     return data.positions
   }
 
+  // Update trading config (position size, etc.)
+  async updateConfig(config: Partial<{
+    investmentPerSide: number
+    maxPositionSize: number
+    maxDailyLoss: number
+    makerBidPrice: number
+    makerAskPrice: number
+  }>): Promise<void> {
+    console.log(`[TRADING API] Updating config:`, config)
+
+    const res = await fetch(`${API_URL}/trading/config`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(config),
+    })
+
+    if (!res.ok) {
+      const err = await res.json()
+      throw new Error(err.error || 'Failed to update config')
+    }
+
+    console.log(`[TRADING API] Config updated`)
+  }
+
   // Disable live trading (just sets the flag - doesn't cancel orders)
   disable() {
     this._isLive = false

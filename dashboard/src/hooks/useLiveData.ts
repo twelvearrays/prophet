@@ -15,9 +15,22 @@ import {
 import { logAudit } from "@/lib/auditLog"
 import { tradingApi } from "@/lib/tradingApi"
 
-// Strategy configuration
+// Strategy configuration - position size is configurable
+let positionSizeConfig = 5 // Default $5 per side, configurable via UI
+
+export function setPositionSize(size: number) {
+  if (size >= 1 && size <= 100) {
+    positionSizeConfig = size
+    console.log(`[CONFIG] Position size updated: $${size}`)
+  }
+}
+
+export function getPositionSize(): number {
+  return positionSizeConfig
+}
+
 const CONFIG = {
-  positionSize: 30,
+  get positionSize() { return positionSizeConfig }, // Dynamic getter
   entryThreshold: 0.65,
   maxEntryPrice: 0.75, // Don't enter if price is already above this (missed the entry)
   scale2Threshold: 0.73,

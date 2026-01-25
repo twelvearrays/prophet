@@ -4,13 +4,21 @@ import { tradingApi, TradingStatus } from '@/lib/tradingApi'
 
 interface LiveTradingPanelProps {
   onStatusChange?: (isLive: boolean) => void
+  onPositionSizeChange?: (size: number) => void
+  positionSize?: number
 }
 
-export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
+export function LiveTradingPanel({ onStatusChange, onPositionSizeChange, positionSize = 5 }: LiveTradingPanelProps) {
   const [status, setStatus] = useState<TradingStatus | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<number | null>(null)
+  const [localPositionSize, setLocalPositionSize] = useState(positionSize)
+
+  // Sync with external prop
+  useEffect(() => {
+    setLocalPositionSize(positionSize)
+  }, [positionSize])
 
   // Check status on mount
   useEffect(() => {
@@ -39,6 +47,10 @@ export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
     try {
       const result = await tradingApi.initialize()
       setBalance(result.balance)
+
+      // Update position size in backend
+      await tradingApi.updateConfig({ investmentPerSide: localPositionSize })
+
       await checkStatus()
       onStatusChange?.(true)
     } catch (e) {
@@ -52,6 +64,30 @@ export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
     tradingApi.disable()
     setStatus(prev => prev ? { ...prev, enabled: false } : null)
     onStatusChange?.(false)
+  }
+
+  const handlePositionSizeChange = (delta: number) => {
+    const newSize = Math.max(1, Math.min(100, localPositionSize + delta))
+    setLocalPositionSize(newSize)
+    onPositionSizeChange?.(newSize)
+
+    // Update backend if live
+    if (status?.enabled) {
+      tradingApi.updateConfig({ investmentPerSide: newSize }).catch(console.error)
+    }
+  }
+
+  const handlePositionSizeInput = (value: string) => {
+    const num = parseInt(value, 10)
+    if (!isNaN(num) && num >= 1 && num <= 100) {
+      setLocalPositionSize(num)
+      onPositionSizeChange?.(num)
+
+      // Update backend if live
+      if (status?.enabled) {
+        tradingApi.updateConfig({ investmentPerSide: num }).catch(console.error)
+      }
+    }
   }
 
   const isLive = status?.enabled ?? false
@@ -87,8 +123,55 @@ export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
           </div>
         )}
 
+        {/* Position Size Control - Always visible */}
+        <div className="space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-zinc-500">Position Size (per side)</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => handlePositionSizeChange(-5)}
+              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+            >
+              -5
+            </button>
+            <button
+              onClick={() => handlePositionSizeChange(-1)}
+              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+            >
+              -1
+            </button>
+            <div className="flex-1 flex items-center justify-center">
+              <span className="text-lg font-mono text-zinc-100">$</span>
+              <input
+                type="number"
+                value={localPositionSize}
+                onChange={(e) => handlePositionSizeInput(e.target.value)}
+                className="w-12 text-lg font-mono text-zinc-100 bg-transparent border-none text-center focus:outline-none focus:ring-1 focus:ring-zinc-600 rounded"
+                min={1}
+                max={100}
+              />
+            </div>
+            <button
+              onClick={() => handlePositionSizeChange(1)}
+              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+            >
+              +1
+            </button>
+            <button
+              onClick={() => handlePositionSizeChange(5)}
+              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
+            >
+              +5
+            </button>
+          </div>
+          <div className="text-xs text-zinc-600 text-center">
+            Total per trade: ${localPositionSize * 2} (${localPositionSize} YES + ${localPositionSize} NO)
+          </div>
+        </div>
+
         {isLive ? (
-          <div className="space-y-3">
+          <div className="space-y-3 pt-2 border-t border-zinc-800">
             <div className="flex items-center justify-between text-xs">
               <span className="text-zinc-500">Wallet</span>
               <span className="font-mono text-zinc-300">
@@ -101,14 +184,8 @@ export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
                 {(status?.dailyPnl ?? 0) >= 0 ? '+' : ''}${(status?.dailyPnl ?? 0).toFixed(2)}
               </span>
             </div>
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-zinc-500">Investment/Side</span>
-              <span className="font-mono text-zinc-300">
-                ${status?.config?.investmentPerSide ?? 10}
-              </span>
-            </div>
 
-            <div className="pt-2 border-t border-zinc-800">
+            <div className="pt-2">
               <button
                 onClick={disableLiveTrading}
                 className="w-full px-3 py-2 text-sm font-medium rounded-md bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
@@ -122,10 +199,9 @@ export function LiveTradingPanel({ onStatusChange }: LiveTradingPanelProps) {
             </p>
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-3 pt-2 border-t border-zinc-800">
             <p className="text-xs text-zinc-500">
               Enable live trading to execute real orders on Polymarket.
-              Make sure you have USDC in your wallet.
             </p>
 
             <button

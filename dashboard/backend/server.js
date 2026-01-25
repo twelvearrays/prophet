@@ -1122,6 +1122,18 @@ app.get('/api/trading/status', (req, res) => {
   });
 });
 
+// Update trading config
+app.post('/api/trading/config', (req, res) => {
+  try {
+    const updatedConfig = trading.updateConfig(req.body);
+    console.log('[TRADING API] Config updated:', req.body);
+    res.json({ success: true, config: updatedConfig });
+  } catch (error) {
+    console.error('[TRADING API] Config update failed:', error.message);
+    res.status(400).json({ error: error.message });
+  }
+});
+
 // Get balance
 app.get('/api/trading/balance', async (req, res) => {
   try {

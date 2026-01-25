@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect } from "react"
+import { useState, useMemo, useEffect, useCallback } from "react"
 import { PortfolioHeader } from "@/components/dashboard/PortfolioHeader"
 import { SessionCard } from "@/components/dashboard/SessionCard"
 import { SessionDetail } from "@/components/dashboard/SessionDetail"
@@ -8,13 +8,22 @@ import { AuditLog } from "@/components/dashboard/AuditLog"
 import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
 import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
-import { useLiveData } from "@/hooks/useLiveData"
+import { useLiveData, setPositionSize } from "@/hooks/useLiveData"
+import { setDualEntryPositionSize } from "@/strategies/dualEntry"
 
 function App() {
   const [mode, setMode] = useState<"simulation" | "live">("live")
   const [showConfig, setShowConfig] = useState(false)
   const [showAuditLog, setShowAuditLog] = useState(false)
   const [isLiveTrading, setIsLiveTrading] = useState(false)
+  const [positionSize, setPositionSizeState] = useState(5) // Default $5
+
+  // Update both momentum and dual-entry configs when position size changes
+  const handlePositionSizeChange = useCallback((size: number) => {
+    setPositionSizeState(size)
+    setPositionSize(size)
+    setDualEntryPositionSize(size)
+  }, [])
 
   const simulation = useSimulation()
   const live = useLiveData()
@@ -169,7 +178,11 @@ function App() {
               <ConfigPanel />
             </div>
             <div className="col-span-3">
-              <LiveTradingPanel onStatusChange={setIsLiveTrading} />
+              <LiveTradingPanel
+                onStatusChange={setIsLiveTrading}
+                positionSize={positionSize}
+                onPositionSizeChange={handlePositionSizeChange}
+              />
             </div>
           </div>
         )}

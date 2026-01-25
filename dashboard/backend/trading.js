@@ -9,9 +9,10 @@ import { Wallet } from '@ethersproject/wallet';
 // CONFIGURATION
 // ============================================================================
 
-const TRADING_CONFIG = {
+// Mutable config - can be updated via API
+export let TRADING_CONFIG = {
   // Position sizing (in USDC)
-  investmentPerSide: 10,      // $10 per side for dual-entry
+  investmentPerSide: 5,       // $5 per side for dual-entry (configurable $1-$100)
   maxPositionSize: 50,        // Max $50 per position
   maxDailyLoss: 100,          // Stop trading if down $100
 
@@ -26,6 +27,35 @@ const TRADING_CONFIG = {
   // Order tracking
   orderCheckIntervalMs: 1000, // Check order status every 1s
 };
+
+/**
+ * Update trading configuration
+ * @param {Object} updates - Partial config updates
+ */
+export function updateConfig(updates) {
+  const allowedKeys = ['investmentPerSide', 'maxPositionSize', 'maxDailyLoss', 'makerBidPrice', 'makerAskPrice'];
+
+  for (const key of Object.keys(updates)) {
+    if (allowedKeys.includes(key)) {
+      const value = updates[key];
+      // Validate ranges
+      if (key === 'investmentPerSide' && (value < 1 || value > 100)) {
+        throw new Error('investmentPerSide must be between $1 and $100');
+      }
+      if (key === 'maxPositionSize' && (value < 1 || value > 500)) {
+        throw new Error('maxPositionSize must be between $1 and $500');
+      }
+      if ((key === 'makerBidPrice' || key === 'makerAskPrice') && (value < 0.01 || value > 0.99)) {
+        throw new Error('Maker prices must be between 0.01 and 0.99');
+      }
+
+      TRADING_CONFIG[key] = value;
+      console.log(`[TRADING] Config updated: ${key} = ${value}`);
+    }
+  }
+
+  return TRADING_CONFIG;
+}
 
 // ============================================================================
 // TRADING CLIENT SETUP

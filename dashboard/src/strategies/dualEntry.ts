@@ -18,13 +18,27 @@ import type {
   Side,
 } from "@/types"
 
+// Configurable position size - shared with momentum strategy
+let dualEntryPositionSize = 5 // Default $5 per side
+
+export function setDualEntryPositionSize(size: number) {
+  if (size >= 1 && size <= 100) {
+    dualEntryPositionSize = size
+    console.log(`[DUAL CONFIG] Position size updated: $${size}`)
+  }
+}
+
+export function getDualEntryPositionSize(): number {
+  return dualEntryPositionSize
+}
+
 // Dual-Entry Strategy Configuration
 export const DUAL_ENTRY_CONFIG = {
   // MAKER ORDER STRATEGY - Place limit orders at these prices
   // We place 4 orders and wait for fills on both sides
   makerBidPrice: 0.46,        // Bid YES at 46¢, Bid NO at 46¢ (aggressive)
   makerAskPrice: 0.54,        // Also bid YES at 54¢, NO at 54¢ (less aggressive)
-  investmentPerSide: 100,     // $100 per side = $200 total
+  get investmentPerSide() { return dualEntryPositionSize }, // Dynamic - configurable via UI
 
   // Exit thresholds - RELATIVE to entry price
   loserDropPct: 0.15,         // Exit loser when it drops 15% from entry
