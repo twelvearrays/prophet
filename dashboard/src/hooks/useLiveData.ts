@@ -91,6 +91,21 @@ type StrategyMode = 'single' | 'compare'
 let strategyMode: StrategyMode = 'compare' // Default to comparison mode
 let activeStrategy: StrategyType = 'MOMENTUM'
 
+// Asset filter - which cryptos to trade
+type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
+let selectedAssets: Asset[] = ['BTC'] // Default to BTC only
+
+export function setSelectedAssets(assets: Asset[]) {
+  if (assets.length > 0) {
+    selectedAssets = assets
+    console.log(`[CONFIG] Selected assets: ${assets.join(', ')}`)
+  }
+}
+
+export function getSelectedAssets(): Asset[] {
+  return selectedAssets
+}
+
 export function setActiveStrategy(strategy: StrategyType) {
   activeStrategy = strategy
   console.log(`[STRATEGY] Switched to ${strategy}`)
@@ -1098,7 +1113,8 @@ export function useLiveData() {
 
   // Fetch markets from backend
   const fetchMarkets = useCallback(async () => {
-    console.log("[LIVE] Fetching markets from backend...")
+    const assetsParam = selectedAssets.join(',')
+    console.log(`[LIVE] Fetching markets from backend (assets: ${assetsParam})...`)
 
     try {
       // Check if backend is running
@@ -1107,8 +1123,8 @@ export function useLiveData() {
         throw new Error("Backend not responding")
       }
 
-      // Fetch 15-min markets
-      const response = await fetch(`${API_URL}/markets/crypto-15m`)
+      // Fetch 15-min markets with asset filter
+      const response = await fetch(`${API_URL}/markets/crypto-15m?assets=${assetsParam}`)
       if (!response.ok) {
         throw new Error(`Backend error: ${response.status}`)
       }

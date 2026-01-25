@@ -8,8 +8,10 @@ import { AuditLog } from "@/components/dashboard/AuditLog"
 import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
 import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
-import { useLiveData, setPositionSize } from "@/hooks/useLiveData"
+import { useLiveData, setPositionSize, setSelectedAssets } from "@/hooks/useLiveData"
 import { setDualEntryPositionSize } from "@/strategies/dualEntry"
+
+type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
 function App() {
   const [mode, setMode] = useState<"simulation" | "live">("live")
@@ -17,12 +19,19 @@ function App() {
   const [showAuditLog, setShowAuditLog] = useState(false)
   const [isLiveTrading, setIsLiveTrading] = useState(false)
   const [positionSize, setPositionSizeState] = useState(5) // Default $5
+  const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
 
   // Update both momentum and dual-entry configs when position size changes
   const handlePositionSizeChange = useCallback((size: number) => {
     setPositionSizeState(size)
     setPositionSize(size)
     setDualEntryPositionSize(size)
+  }, [])
+
+  // Update asset filter
+  const handleAssetsChange = useCallback((assets: Asset[]) => {
+    setSelectedAssetsState(assets)
+    setSelectedAssets(assets)
   }, [])
 
   const simulation = useSimulation()
@@ -182,6 +191,8 @@ function App() {
                 onStatusChange={setIsLiveTrading}
                 positionSize={positionSize}
                 onPositionSizeChange={handlePositionSizeChange}
+                selectedAssets={selectedAssetsState}
+                onAssetsChange={handleAssetsChange}
               />
             </div>
           </div>

@@ -2,23 +2,39 @@ import { useState, useEffect } from 'react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { tradingApi, TradingStatus } from '@/lib/tradingApi'
 
+const AVAILABLE_ASSETS = ['BTC', 'ETH', 'SOL', 'XRP'] as const
+type Asset = typeof AVAILABLE_ASSETS[number]
+
 interface LiveTradingPanelProps {
   onStatusChange?: (isLive: boolean) => void
   onPositionSizeChange?: (size: number) => void
+  onAssetsChange?: (assets: Asset[]) => void
   positionSize?: number
+  selectedAssets?: Asset[]
 }
 
-export function LiveTradingPanel({ onStatusChange, onPositionSizeChange, positionSize = 5 }: LiveTradingPanelProps) {
+export function LiveTradingPanel({
+  onStatusChange,
+  onPositionSizeChange,
+  onAssetsChange,
+  positionSize = 5,
+  selectedAssets = ['BTC'],
+}: LiveTradingPanelProps) {
   const [status, setStatus] = useState<TradingStatus | null>(null)
   const [isLoading, setIsLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [balance, setBalance] = useState<number | null>(null)
   const [localPositionSize, setLocalPositionSize] = useState(positionSize)
+  const [localAssets, setLocalAssets] = useState<Asset[]>(selectedAssets)
 
-  // Sync with external prop
+  // Sync with external props
   useEffect(() => {
     setLocalPositionSize(positionSize)
   }, [positionSize])
+
+  useEffect(() => {
+    setLocalAssets(selectedAssets)
+  }, [selectedAssets])
 
   // Check status on mount
   useEffect(() => {
@@ -90,6 +106,18 @@ export function LiveTradingPanel({ onStatusChange, onPositionSizeChange, positio
     }
   }
 
+  const toggleAsset = (asset: Asset) => {
+    const newAssets = localAssets.includes(asset)
+      ? localAssets.filter(a => a !== asset)
+      : [...localAssets, asset]
+
+    // Ensure at least one asset is selected
+    if (newAssets.length === 0) return
+
+    setLocalAssets(newAssets)
+    onAssetsChange?.(newAssets)
+  }
+
   const isLive = status?.enabled ?? false
 
   return (
@@ -123,7 +151,27 @@ export function LiveTradingPanel({ onStatusChange, onPositionSizeChange, positio
           </div>
         )}
 
-        {/* Position Size Control - Always visible */}
+        {/* Asset Selection */}
+        <div className="space-y-2">
+          <span className="text-xs text-zinc-500">Assets to Trade</span>
+          <div className="flex flex-wrap gap-1.5">
+            {AVAILABLE_ASSETS.map(asset => (
+              <button
+                key={asset}
+                onClick={() => toggleAsset(asset)}
+                className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+                  localAssets.includes(asset)
+                    ? 'bg-cyan-500/20 text-cyan-400 border border-cyan-500/30'
+                    : 'bg-zinc-800 text-zinc-500 border border-zinc-700 hover:text-zinc-400'
+                }`}
+              >
+                {asset}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Position Size Control */}
         <div className="space-y-2">
           <div className="flex items-center justify-between">
             <span className="text-xs text-zinc-500">Position Size (per side)</span>

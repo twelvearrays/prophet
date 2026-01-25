@@ -494,7 +494,14 @@ function parseStrikePrice(question, market = null) {
 app.get('/api/markets/crypto-15m', async (req, res) => {
   try {
     const markets = [];
-    const assets = ['BTC', 'ETH', 'SOL', 'XRP'];
+    // Allow filtering by asset via query param (e.g., ?assets=BTC or ?assets=BTC,ETH)
+    const assetParam = req.query.assets;
+    const defaultAssets = ['BTC', 'ETH', 'SOL', 'XRP'];
+    const assets = assetParam
+      ? assetParam.split(',').map(a => a.trim().toUpperCase()).filter(a => defaultAssets.includes(a))
+      : defaultAssets;
+
+    console.log(`[API] Filtering markets for assets: ${assets.join(', ')}`);
 
     // Calculate current 15-minute window
     const nowTs = Math.floor(Date.now() / 1000);
