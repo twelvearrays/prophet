@@ -913,9 +913,19 @@ export function useLiveData() {
       const newHistory = [...existingHistory.slice(-500), tick]
       priceHistoryRef.current.set(conditionId, newHistory)
 
+      // Debug: log history size periodically
+      if (newHistory.length % 50 === 0) {
+        console.log(`[PRICE] Market ${conditionId.slice(0, 10)}... now has ${newHistory.length} ticks`)
+      }
+
       setSessions(prev => prev.map(session => {
         if (session.marketId !== conditionId) return session
-        return processSessionTick(session, tick, newHistory)
+        const updated = processSessionTick(session, tick, newHistory)
+        // Debug: log if priceHistory is being set
+        if (updated.priceHistory.length !== session.priceHistory.length) {
+          console.log(`[SESSION] ${session.asset} ${session.strategyType} priceHistory: ${session.priceHistory.length} -> ${updated.priceHistory.length}`)
+        }
+        return updated
       }))
     }
   }, [processSessionTick])
@@ -1196,8 +1206,11 @@ export function useLiveData() {
                     noLiquidity: priceData.noLiquidity || 100,
                   }
 
-                  // Combine saved history with current tick
-                  const combinedHistory = [...savedHistory, tick].slice(-500)
+                  // Combine: existing accumulated history + saved history from backend + current tick
+                  const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
+                  const combinedHistory = [...existingHistory, ...savedHistory, tick]
+                    .filter((t, i, arr) => i === 0 || t.timestamp !== arr[i-1].timestamp) // dedupe by timestamp
+                    .slice(-500)
                   priceHistoryRef.current.set(m.conditionId, combinedHistory)
 
                   setSessions(prev => prev.map(session => {
@@ -1290,8 +1303,12 @@ export function useLiveData() {
                   noLiquidity: priceData.noLiquidity || 100,
                 }
 
-                // Combine saved history with current tick
-                const combinedHistory = [...savedHistory, tick].slice(-500)
+                // Combine: existing accumulated history + saved history from backend + current tick
+                // Use existing history first (from WebSocket accumulation), then add any saved backend history, then current tick
+                const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
+                const combinedHistory = [...existingHistory, ...savedHistory, tick]
+                  .filter((t, i, arr) => i === 0 || t.timestamp !== arr[i-1].timestamp) // dedupe by timestamp
+                  .slice(-500)
                 priceHistoryRef.current.set(m.conditionId, combinedHistory)
 
                 setSessions(prev => prev.map(session => {
@@ -1494,12 +1511,22 @@ export function useLiveData() {
     const activeSessions = sessions.filter(s => s.state !== "CLOSED").length
     const totalTrades = sessions.reduce((sum, s) => sum + s.actions.filter(a => a.type !== "NONE").length, 0)
 
+    // Calculate win rate from closed sessions with positions
+    const closedWithTrades = sessions.filter(s =>
+      s.state === "CLOSED" && (s.primaryPosition || s.realizedPnl !== 0 || s.hedgedPairs.length > 0)
+    )
+    const wins = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) > 0).length
+    const losses = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) < 0).length
+    const totalCompleted = wins + losses
+    const winRate = totalCompleted > 0 ? Math.round((wins / totalCompleted) * 100) : 50
+
     setStats(prev => ({
       ...prev,
       dailyPnl: totalPnl,
       dailyPnlPercent: (totalPnl / prev.totalValue) * 100,
       activeSessions,
       totalTrades,
+      winRate,
     }))
   }, [sessions])
 

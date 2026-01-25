@@ -1,6 +1,5 @@
 import { useState, useMemo, useEffect } from "react"
 import { PortfolioHeader } from "@/components/dashboard/PortfolioHeader"
-import { KPICard } from "@/components/dashboard/KPICard"
 import { SessionCard } from "@/components/dashboard/SessionCard"
 import { SessionDetail } from "@/components/dashboard/SessionDetail"
 import { StrategyRecap } from "@/components/dashboard/StrategyRecap"
@@ -160,23 +159,6 @@ function App() {
             </button>
           </div>
         )}
-
-        {/* KPI Row */}
-        <div className="grid grid-cols-4 gap-4">
-          <KPICard
-            label="Portfolio Value"
-            value={stats.totalValue}
-            prefix="$"
-            change={stats.dailyPnlPercent}
-          />
-          <KPICard
-            label="Today's P&L"
-            value={Math.abs(stats.dailyPnl).toFixed(2)}
-            prefix={stats.dailyPnl >= 0 ? "+$" : "-$"}
-          />
-          <KPICard label="Total Trades" value={stats.totalTrades} />
-          <KPICard label="Win Rate" value={stats.winRate} suffix="%" />
-        </div>
 
         {/* Config Panel (Collapsible) */}
         {showConfig && (

@@ -68,6 +68,9 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.fillStyle = "transparent"
     ctx.fillRect(0, 0, dimensions.width, dimensions.height)
 
+    // Debug: log data length
+    console.log(`[CHART] Rendering with ${data.length} data points, startTime=${startTime}, endTime=${endTime}`)
+
     if (data.length === 0) {
       ctx.fillStyle = "#71717a"
       ctx.font = "14px 'Outfit', sans-serif"
