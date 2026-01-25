@@ -6,6 +6,7 @@ import { StrategyRecap } from "@/components/dashboard/StrategyRecap"
 import { ConfigPanel } from "@/components/dashboard/ConfigPanel"
 import { AuditLog } from "@/components/dashboard/AuditLog"
 import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
+import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
 import { useLiveData } from "@/hooks/useLiveData"
 
@@ -13,6 +14,7 @@ function App() {
   const [mode, setMode] = useState<"simulation" | "live">("live")
   const [showConfig, setShowConfig] = useState(false)
   const [showAuditLog, setShowAuditLog] = useState(false)
+  const [isLiveTrading, setIsLiveTrading] = useState(false)
 
   const simulation = useSimulation()
   const live = useLiveData()
@@ -120,8 +122,8 @@ function App() {
           </div>
           <div className="flex items-center gap-3">
             {mode === "live" && (
-              <span className="text-xs text-zinc-500">
-                Prices from Polymarket • No real orders
+              <span className={`text-xs ${isLiveTrading ? 'text-red-400' : 'text-zinc-500'}`}>
+                {isLiveTrading ? '🔴 LIVE TRADING ACTIVE' : 'Prices from Polymarket • Paper trading'}
               </span>
             )}
             <button
@@ -162,8 +164,13 @@ function App() {
 
         {/* Config Panel (Collapsible) */}
         {showConfig && (
-          <div className="mb-4">
-            <ConfigPanel />
+          <div className="mb-4 grid grid-cols-12 gap-4">
+            <div className="col-span-9">
+              <ConfigPanel />
+            </div>
+            <div className="col-span-3">
+              <LiveTradingPanel onStatusChange={setIsLiveTrading} />
+            </div>
           </div>
         )}
 

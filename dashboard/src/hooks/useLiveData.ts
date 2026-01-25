@@ -13,6 +13,7 @@ import {
   calculateDualPnl,
 } from "@/strategies/dualEntry"
 import { logAudit } from "@/lib/auditLog"
+import { tradingApi } from "@/lib/tradingApi"
 
 // Strategy configuration
 const CONFIG = {
@@ -564,7 +565,7 @@ export function useLiveData() {
     []
   )
 
-  // Execute action (paper trade) - uses fillPrice with slippage
+  // Execute action (paper trade OR live trade) - uses fillPrice with slippage
   const executeAction = useCallback(
     (session: TradingSession, action: StrategyAction): TradingSession => {
       const updated = { ...session }
@@ -575,7 +576,45 @@ export function useLiveData() {
       // Use fillPrice (with slippage) if available, otherwise targetPrice
       const executionPrice = action.fillPrice || action.targetPrice
 
-      console.log(`[PAPER TRADE] ${action.type} ${action.targetShares.toFixed(1)} ${action.side} @ ${(executionPrice * 100).toFixed(1)}¢ (trigger: ${(action.targetPrice * 100).toFixed(1)}¢)`)
+      // Check if live trading is enabled - if so, execute real orders
+      if (tradingApi.isLive) {
+        const market = marketsRef.current.get(session.marketId)
+        if (market) {
+          const tokenId = action.side === "YES" ? market.yesTokenId : market.noTokenId
+          const amount = action.targetShares * executionPrice // Dollar amount for market orders
+
+          console.log(`[LIVE TRADE] ${action.type} ${action.targetShares.toFixed(1)} ${action.side} @ ${(executionPrice * 100).toFixed(1)}¢ | Token: ${tokenId.slice(0, 12)}...`)
+
+          // Execute the appropriate order type
+          if (action.type === "ENTER" || action.type === "SCALE" || action.type === "HEDGE") {
+            // Use market orders for immediate execution (buys)
+            tradingApi.placeMarketOrder({
+              tokenId,
+              side: 'BUY',
+              amount,
+            }).then(result => {
+              console.log(`[LIVE TRADE] ✅ ${action.type} order filled:`, result.status)
+            }).catch(err => {
+              console.error(`[LIVE TRADE] ❌ ${action.type} order failed:`, err.message)
+            })
+          } else if (action.type === "CLOSE") {
+            // Sell existing shares (take profit / exit)
+            tradingApi.placeMarketOrder({
+              tokenId,
+              side: 'SELL',
+              amount: action.targetShares, // For sell, use shares not dollar amount
+            }).then(result => {
+              console.log(`[LIVE TRADE] ✅ CLOSE order filled:`, result.status)
+            }).catch(err => {
+              console.error(`[LIVE TRADE] ❌ CLOSE order failed:`, err.message)
+            })
+          }
+        } else {
+          console.error(`[LIVE TRADE] Market not found for session: ${session.marketId}`)
+        }
+      } else {
+        console.log(`[PAPER TRADE] ${action.type} ${action.targetShares.toFixed(1)} ${action.side} @ ${(executionPrice * 100).toFixed(1)}¢ (trigger: ${(action.targetPrice * 100).toFixed(1)}¢)`)
+      }
 
       // Log execution to audit log (only for valid execution types)
       const tick = session.currentTick
@@ -784,6 +823,24 @@ export function useLiveData() {
         const entryAction = checkDualEntry(updated, tick)
         if (entryAction) {
           updated = executeDualEntry(updated, tick)
+
+          // If live trading is enabled, place real dual-entry maker orders
+          if (tradingApi.isLive) {
+            const market = marketsRef.current.get(session.marketId)
+            if (market) {
+              console.log(`[LIVE TRADE] Placing dual-entry maker orders for ${session.asset}...`)
+              tradingApi.placeDualEntryOrders({
+                yesTokenId: market.yesTokenId,
+                noTokenId: market.noTokenId,
+                marketId: session.marketId,
+              }).then(result => {
+                console.log(`[LIVE TRADE] ✅ Dual-entry orders placed:`, result.orders?.length)
+              }).catch(err => {
+                console.error(`[LIVE TRADE] ❌ Dual-entry orders failed:`, err.message)
+              })
+            }
+          }
+
           // Log maker orders placed
           logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_PLACED', tick, updated.endTime,
             { action: 'PLACE_MAKER_ORDERS', reason: 'Placing 4 limit orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢' },
@@ -826,6 +883,26 @@ export function useLiveData() {
         const loserCheck = checkLoserExit(updated, tick)
         if (loserCheck) {
           updated = executeLoserExit(updated, loserCheck.side, loserCheck.price)
+
+          // If live trading, sell the loser position
+          if (tradingApi.isLive && updated.dualPosition) {
+            const market = marketsRef.current.get(session.marketId)
+            if (market) {
+              const tokenId = loserCheck.side === "YES" ? market.yesTokenId : market.noTokenId
+              const shares = loserCheck.side === "YES" ? updated.dualPosition.yesShares : updated.dualPosition.noShares
+              console.log(`[LIVE TRADE] Selling loser ${loserCheck.side} (${shares.toFixed(1)} shares)...`)
+              tradingApi.placeMarketOrder({
+                tokenId,
+                side: 'SELL',
+                amount: shares,
+              }).then(result => {
+                console.log(`[LIVE TRADE] ✅ Loser sold:`, result.status)
+              }).catch(err => {
+                console.error(`[LIVE TRADE] ❌ Loser sell failed:`, err.message)
+              })
+            }
+          }
+
           // Log loser exit
           logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'LOSER_EXIT', tick, updated.endTime,
             { action: 'SELL_LOSER', reason: `Sold loser ${loserCheck.side} @ ${(loserCheck.price * 100).toFixed(1)}¢` },
@@ -837,7 +914,30 @@ export function useLiveData() {
       if (updated.dualEntryState === 'WAITING_WINNER') {
         const winnerCheck = checkWinnerExit(updated, tick)
         if (winnerCheck) {
+          // Get position info BEFORE calling executeWinnerExit (which closes it)
+          const winnerSide = updated.dualTrade?.winnerSide
+          const winnerShares = winnerSide === "YES" ? updated.dualPosition?.yesShares : updated.dualPosition?.noShares
+
           updated = executeWinnerExit(updated, winnerCheck.price)
+
+          // If live trading, sell the winner position
+          if (tradingApi.isLive && winnerSide && winnerShares) {
+            const market = marketsRef.current.get(session.marketId)
+            if (market) {
+              const tokenId = winnerSide === "YES" ? market.yesTokenId : market.noTokenId
+              console.log(`[LIVE TRADE] Selling winner ${winnerSide} (${winnerShares.toFixed(1)} shares)...`)
+              tradingApi.placeMarketOrder({
+                tokenId,
+                side: 'SELL',
+                amount: winnerShares,
+              }).then(result => {
+                console.log(`[LIVE TRADE] ✅ Winner sold:`, result.status)
+              }).catch(err => {
+                console.error(`[LIVE TRADE] ❌ Winner sell failed:`, err.message)
+              })
+            }
+          }
+
           // Log winner exit
           logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'WINNER_EXIT', tick, updated.endTime,
             { action: 'SELL_WINNER', reason: `Sold winner @ ${(winnerCheck.price * 100).toFixed(1)}¢` },
