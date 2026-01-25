@@ -655,5 +655,3 @@ setInterval(() => {
     console.log('[TRADING] Daily P&L reset');
   }
 }, 60000);
-
-export { TRADING_CONFIG };
