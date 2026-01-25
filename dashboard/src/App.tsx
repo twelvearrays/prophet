@@ -18,7 +18,7 @@ function App() {
   const [showConfig, setShowConfig] = useState(false)
   const [showAuditLog, setShowAuditLog] = useState(false)
   const [isLiveTrading, setIsLiveTrading] = useState(false)
-  const [positionSize, setPositionSizeState] = useState(5) // Default $5
+  const [positionSize, setPositionSizeState] = useState(1) // Default $1
   const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
 
   // Update both momentum and dual-entry configs when position size changes

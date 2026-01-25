@@ -19,7 +19,7 @@ import type {
 } from "@/types"
 
 // Configurable position size - shared with momentum strategy
-let dualEntryPositionSize = 5 // Default $5 per side
+let dualEntryPositionSize = 1 // Default $1 per side
 
 export function setDualEntryPositionSize(size: number) {
   if (size >= 1 && size <= 100) {

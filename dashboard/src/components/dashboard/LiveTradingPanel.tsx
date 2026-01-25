@@ -17,7 +17,7 @@ export function LiveTradingPanel({
   onStatusChange,
   onPositionSizeChange,
   onAssetsChange,
-  positionSize = 5,
+  positionSize = 1,
   selectedAssets = ['BTC'],
 }: LiveTradingPanelProps) {
   const [status, setStatus] = useState<TradingStatus | null>(null)

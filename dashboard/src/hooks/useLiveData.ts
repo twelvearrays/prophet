@@ -16,7 +16,7 @@ import { logAudit } from "@/lib/auditLog"
 import { tradingApi } from "@/lib/tradingApi"
 
 // Strategy configuration - position size is configurable
-let positionSizeConfig = 5 // Default $5 per side, configurable via UI
+let positionSizeConfig = 1 // Default $1 per side, configurable via UI
 
 export function setPositionSize(size: number) {
   if (size >= 1 && size <= 100) {

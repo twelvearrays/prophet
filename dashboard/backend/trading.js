@@ -12,7 +12,7 @@ import { Wallet } from '@ethersproject/wallet';
 // Mutable config - can be updated via API
 export let TRADING_CONFIG = {
   // Position sizing (in USDC)
-  investmentPerSide: 5,       // $5 per side for dual-entry (configurable $1-$100)
+  investmentPerSide: 1,       // $1 per side for dual-entry (configurable $1-$100)
   maxPositionSize: 50,        // Max $50 per position
   maxDailyLoss: 100,          // Stop trading if down $100
 
