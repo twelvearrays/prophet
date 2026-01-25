@@ -9,7 +9,8 @@ const typeConfig: Record<string, { label: string; className: string }> = {
   ENTER: { label: "ENTER", className: "text-cyan-400" },
   SCALE: { label: "SCALE", className: "text-cyan-400" },
   HEDGE: { label: "HEDGE", className: "text-amber-400" },
-  CLOSE: { label: "CLOSE", className: "text-zinc-400" },
+  SOLD: { label: "SOLD", className: "text-rose-400" },  // Dual-entry sell loser
+  CLOSE: { label: "PROFIT", className: "text-emerald-400" },  // Take profit - green!
   NONE: { label: "WAIT", className: "text-zinc-500" },
 }
 

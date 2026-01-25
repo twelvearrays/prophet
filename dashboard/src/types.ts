@@ -128,7 +128,7 @@ export interface TradingSession {
 }
 
 export interface StrategyAction {
-  type: 'ENTER' | 'SCALE' | 'HEDGE' | 'CLOSE' | 'NONE'
+  type: 'ENTER' | 'SCALE' | 'HEDGE' | 'SOLD' | 'CLOSE' | 'NONE'
   side: Side
   reason: string
   targetPrice: number
@@ -139,7 +139,7 @@ export interface StrategyAction {
 
 // Pending order waiting for confirmation ticks
 export interface PendingOrder {
-  type: 'ENTER' | 'SCALE' | 'HEDGE'
+  type: 'ENTER' | 'SCALE' | 'HEDGE' | 'CLOSE'
   side: Side
   triggerPrice: number  // Price that triggered this order
   targetShares: number

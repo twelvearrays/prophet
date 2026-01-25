@@ -12,6 +12,7 @@ import {
   executeForceExit,
   calculateDualPnl,
 } from "@/strategies/dualEntry"
+import { logAudit } from "@/lib/auditLog"
 
 // Strategy configuration
 const CONFIG = {
@@ -20,6 +21,9 @@ const CONFIG = {
   maxEntryPrice: 0.75, // Don't enter if price is already above this (missed the entry)
   scale2Threshold: 0.73,
   scale3Threshold: 0.80,
+  // TAKE PROFIT - NEW!
+  takeProfitEnabled: true, // Enable take-profit exits
+  takeProfitThreshold: 0.95, // Exit when price hits 95¢ to lock gains
   // Hedge settings - adaptive based on entry and time
   baseHedgeTrigger: 0.48, // Floor: hedge when our side drops below 48¢
   hedgeTrailingPts: 0.17, // Trailing: hedge when price drops 17pts from entry
@@ -36,8 +40,8 @@ const CONFIG = {
   lateGameThreshold: 0.85,
   // Realism settings
   slippageBps: 100, // 1% slippage (100 basis points) - fills slightly worse than trigger
-  confirmationTicks: 3, // Price must stay at threshold for N ticks before filling
-  cooldownAfterFillMs: 10000, // 10 second cooldown after a fill before next order
+  confirmationTicks: 1, // Fill immediately on first tick (was 3, but too slow for volatile markets)
+  cooldownAfterFillMs: 5000, // 5 second cooldown after a fill before next order (was 10s)
   // Liquidity requirements
   minLiquidityForEntry: 50, // Minimum $ liquidity to enter
   minLiquidityForHedge: 100, // Higher requirement for hedge (we NEED this to execute)
@@ -124,16 +128,18 @@ function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType):
 
 // Create sessions from market - either one or two depending on mode
 function createSessionsFromMarket(market: CryptoMarket): TradingSession[] {
-  if (strategyMode === 'compare') {
-    // Create both strategies for comparison
-    return [
-      createSessionForStrategy(market, 'MOMENTUM'),
-      createSessionForStrategy(market, 'DUAL_ENTRY'),
-    ]
-  } else {
-    // Single strategy mode
-    return [createSessionForStrategy(market, activeStrategy)]
-  }
+  // ALWAYS create both for now to ensure we can test dual-entry
+  // The UI will filter based on strategyMode
+  console.log(`[SESSION] Creating sessions for ${market.asset}, mode: ${strategyMode}`)
+
+  // Always create BOTH strategies - we want to compare them
+  const sessions = [
+    createSessionForStrategy(market, 'MOMENTUM'),
+    createSessionForStrategy(market, 'DUAL_ENTRY'),
+  ]
+
+  console.log(`[SESSION] Created ${sessions.length} sessions: ${sessions.map(s => s.strategyType).join(', ')}`)
+  return sessions
 }
 
 // Apply slippage to fill price (makes fill price worse for the trader)
@@ -196,12 +202,10 @@ export function useLiveData() {
       }
 
       if (session.state === "WAITING") {
-        // After max hedges, stop re-entering - just hold what we have
-        if (session.hedgedPairs.length >= CONFIG.maxHedges) {
-          if (session.priceHistory.length % 60 === 0) {
-            console.log(`[RE-ENTRY BLOCKED] ${session.asset} | Already have ${session.hedgedPairs.length} hedges - not re-entering, holding to settlement`)
-          }
-          return null
+        // After max hedges, we CAN still re-enter and scale - we just can't hedge anymore
+        // Log that we're at max hedges but still looking
+        if (session.hedgedPairs.length >= CONFIG.maxHedges && session.priceHistory.length % 60 === 0) {
+          console.log(`[MAX HEDGES] ${session.asset} | Have ${session.hedgedPairs.length} hedges - can still enter/scale but NO MORE HEDGING`)
         }
 
         // Log that we're looking for re-entry after hedge
@@ -216,10 +220,21 @@ export function useLiveData() {
           if (tick.yesLiquidity < CONFIG.minLiquidityForEntry) {
             if (session.priceHistory.length % 20 === 0) {
               console.log(`[LIQUIDITY] ${session.asset} | YES liquidity too low: $${tick.yesLiquidity.toFixed(0)} (need $${CONFIG.minLiquidityForEntry})`)
+              logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SKIP', tick, session.endTime, {
+                action: 'SKIP_ENTRY',
+                reason: `YES liquidity too low: $${tick.yesLiquidity.toFixed(0)} (need $${CONFIG.minLiquidityForEntry})`,
+                thresholds: { entryThreshold: threshold, minLiquidity: CONFIG.minLiquidityForEntry },
+              }, { severity: 'warning' })
             }
             return null
           }
           console.log(`[PENDING] ${session.asset} | YES hit ${(yesPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.yesLiquidity.toFixed(0)})`)
+          logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SIGNAL', tick, session.endTime, {
+            action: 'ENTRY_SIGNAL',
+            reason: `YES crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            thresholds: { entryThreshold: threshold, maxEntryPrice: CONFIG.maxEntryPrice },
+            calculation: `${(yesPrice * 100).toFixed(1)}¢ >= ${(threshold * 100).toFixed(0)}¢ && <= ${(CONFIG.maxEntryPrice * 100).toFixed(0)}¢`,
+          }, { severity: 'action' })
           return {
             type: "ENTER",
             side: "YES",
@@ -235,10 +250,21 @@ export function useLiveData() {
           if (tick.noLiquidity < CONFIG.minLiquidityForEntry) {
             if (session.priceHistory.length % 20 === 0) {
               console.log(`[LIQUIDITY] ${session.asset} | NO liquidity too low: $${tick.noLiquidity.toFixed(0)} (need $${CONFIG.minLiquidityForEntry})`)
+              logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SKIP', tick, session.endTime, {
+                action: 'SKIP_ENTRY',
+                reason: `NO liquidity too low: $${tick.noLiquidity.toFixed(0)} (need $${CONFIG.minLiquidityForEntry})`,
+                thresholds: { entryThreshold: threshold, minLiquidity: CONFIG.minLiquidityForEntry },
+              }, { severity: 'warning' })
             }
             return null
           }
           console.log(`[PENDING] ${session.asset} | NO hit ${(noPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.noLiquidity.toFixed(0)})`)
+          logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SIGNAL', tick, session.endTime, {
+            action: 'ENTRY_SIGNAL',
+            reason: `NO crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            thresholds: { entryThreshold: threshold, maxEntryPrice: CONFIG.maxEntryPrice },
+            calculation: `${(noPrice * 100).toFixed(1)}¢ >= ${(threshold * 100).toFixed(0)}¢ && <= ${(CONFIG.maxEntryPrice * 100).toFixed(0)}¢`,
+          }, { severity: 'action' })
           return {
             type: "ENTER",
             side: "NO",
@@ -260,6 +286,37 @@ export function useLiveData() {
         const pos = session.primaryPosition
         const currentPrice = pos.side === "YES" ? yesPrice : noPrice
         const oppPrice = pos.side === "YES" ? noPrice : yesPrice
+
+        // ==========================================
+        // TAKE PROFIT CHECK - Exit at 95¢ to lock in gains
+        // ==========================================
+        if (CONFIG.takeProfitEnabled && currentPrice >= CONFIG.takeProfitThreshold) {
+          const unrealizedPnl = (currentPrice - pos.avgPrice) * pos.totalShares
+          console.log(`[TAKE PROFIT] ${session.asset} | ${pos.side} hit ${(currentPrice * 100).toFixed(1)}¢ >= ${(CONFIG.takeProfitThreshold * 100).toFixed(0)}¢ - SELLING TO LOCK PROFIT!`)
+          logAudit(session.id, session.asset, 'MOMENTUM', 'TAKE_PROFIT', tick, session.endTime, {
+            action: 'TAKE_PROFIT',
+            reason: `${pos.side} hit ${(currentPrice * 100).toFixed(0)}¢ - locking gains!`,
+            thresholds: { takeProfitThreshold: CONFIG.takeProfitThreshold },
+            calculation: `${(currentPrice * 100).toFixed(1)}¢ >= ${(CONFIG.takeProfitThreshold * 100).toFixed(0)}¢`,
+          }, {
+            severity: 'profit',
+            position: {
+              side: pos.side,
+              shares: pos.totalShares,
+              avgPrice: pos.avgPrice,
+              unrealizedPnl,
+            },
+          })
+          return {
+            type: "CLOSE", // Using CLOSE type for profit-taking
+            side: pos.side,
+            triggerPrice: currentPrice,
+            targetShares: pos.totalShares,
+            reason: `Take profit: ${pos.side} hit ${(currentPrice * 100).toFixed(0)}¢ - locking gains!`,
+            confirmationTicks: 1, // Fast exit
+            createdAt: Date.now(),
+          }
+        }
 
         // Calculate adaptive hedge trigger based on:
         // 1. Trailing from entry: entryPrice - 17pts (if entered at 70¢, hedge at 53¢)
@@ -295,20 +352,38 @@ export function useLiveData() {
         // Rule 1: Max 2 hedges per session
         if (session.hedgedPairs.length >= CONFIG.maxHedges) {
           if (session.priceHistory.length % 30 === 0 && currentPrice < adaptiveHedgeTrigger) {
-            console.log(`[HEDGE LIMIT] ${session.asset} | Already have ${session.hedgedPairs.length} hedges (max ${CONFIG.maxHedges}) - holding position`)
+            console.log(`[HEDGE LIMIT] ${session.asset} | Already have ${session.hedgedPairs.length} hedges (max ${CONFIG.maxHedges}) - NO HEDGE, can still scale into winner`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'HEDGE_SKIP', tick, session.endTime, {
+              action: 'HEDGE_SKIP_MAX_REACHED',
+              reason: `Already have ${session.hedgedPairs.length} hedges (max ${CONFIG.maxHedges})`,
+              thresholds: { maxHedges: CONFIG.maxHedges, adaptiveHedgeTrigger },
+            }, {
+              severity: 'warning',
+              position: { side: pos.side, shares: pos.totalShares, avgPrice: pos.avgPrice, hedgeCount: session.hedgedPairs.length },
+            })
           }
-          // Don't create more hedges, continue to scale check
+          // Don't create more hedges, but continue to scale check below!
         }
         // Rule 2: Don't hedge with < 2 minutes left
         else if (remainingMin < CONFIG.minTimeForHedgeMinutes) {
           if (session.priceHistory.length % 30 === 0 && currentPrice < adaptiveHedgeTrigger) {
             console.log(`[HEDGE SKIP] ${session.asset} | Only ${remainingMin.toFixed(1)}min left (need ${CONFIG.minTimeForHedgeMinutes}min) - too late to hedge`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'HEDGE_SKIP', tick, session.endTime, {
+              action: 'HEDGE_SKIP_TIME',
+              reason: `Only ${remainingMin.toFixed(1)}min left (need ${CONFIG.minTimeForHedgeMinutes}min) - too late to hedge`,
+              thresholds: { minTimeForHedge: CONFIG.minTimeForHedgeMinutes, remainingMin },
+            }, { severity: 'warning' })
           }
         }
         // Rule 3: Don't hedge when price is extreme (market is decided)
         else if (currentPrice <= CONFIG.extremePriceNoHedge.low || currentPrice >= CONFIG.extremePriceNoHedge.high) {
           if (session.priceHistory.length % 30 === 0) {
             console.log(`[HEDGE SKIP] ${session.asset} | Price ${(currentPrice * 100).toFixed(1)}¢ is extreme - market decided, no point hedging`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'HEDGE_SKIP', tick, session.endTime, {
+              action: 'HEDGE_SKIP_EXTREME',
+              reason: `Price ${(currentPrice * 100).toFixed(1)}¢ is extreme - market decided`,
+              thresholds: { extremeLow: CONFIG.extremePriceNoHedge.low, extremeHigh: CONFIG.extremePriceNoHedge.high },
+            }, { severity: 'warning' })
           }
         }
         // All checks passed - can hedge
@@ -327,6 +402,15 @@ export function useLiveData() {
             ? `trailing (entry ${(session.entryPrice! * 100).toFixed(0)}¢ - 17pts)`
             : `time-decay (${remainingMin.toFixed(1)}min left)`
           console.log(`[PENDING] ${session.asset} | Hedge trigger: ${pos.side} broke ${(adaptiveHedgeTrigger * 100).toFixed(0)}¢ [${triggerReason}] at ${(currentPrice * 100).toFixed(1)}¢ (opp liq: $${oppLiquidity.toFixed(0)}) [hedge ${session.hedgedPairs.length + 1}/${CONFIG.maxHedges}]`)
+          logAudit(session.id, session.asset, 'MOMENTUM', 'HEDGE_SIGNAL', tick, session.endTime, {
+            action: 'HEDGE_SIGNAL',
+            reason: `${pos.side} broke ${(adaptiveHedgeTrigger * 100).toFixed(0)}¢ [${triggerReason}]`,
+            thresholds: { adaptiveHedgeTrigger, timeBasedTrigger, trailingTrigger, baseHedgeTrigger: CONFIG.baseHedgeTrigger },
+            calculation: `${(currentPrice * 100).toFixed(1)}¢ < ${(adaptiveHedgeTrigger * 100).toFixed(1)}¢`,
+          }, {
+            severity: 'action',
+            position: { side: pos.side, shares: pos.totalShares, avgPrice: pos.avgPrice, hedgeCount: session.hedgedPairs.length },
+          })
           return {
             type: "HEDGE",
             side: pos.side === "YES" ? "NO" : "YES",
@@ -394,6 +478,14 @@ export function useLiveData() {
       if (!priceStillValid) {
         // Price dropped below threshold - cancel the order
         console.log(`[CANCEL] ${session.asset} | ${pending.type} order cancelled - price dropped to ${(currentPrice * 100).toFixed(1)}¢ (trigger was ${(pending.triggerPrice * 100).toFixed(1)}¢)`)
+        logAudit(session.id, session.asset, 'MOMENTUM', 'ORDER_CANCELLED', tick, session.endTime, {
+          action: 'ORDER_CANCELLED',
+          reason: `Price dropped to ${(currentPrice * 100).toFixed(1)}¢ (trigger was ${(pending.triggerPrice * 100).toFixed(1)}¢)`,
+          orderType: pending.type,
+          orderSide: pending.side,
+          triggerPrice: pending.triggerPrice,
+          currentPrice,
+        }, { severity: 'warning' })
         return { action: null, updatedOrder: null }
       }
 
@@ -404,6 +496,17 @@ export function useLiveData() {
         // Order confirmed! Fill with slippage
         const fillPrice = applySlippage(currentPrice, 'BUY', CONFIG.slippageBps)
         console.log(`[FILL] ${session.asset} | ${pending.type} ${pending.side} - trigger ${(pending.triggerPrice * 100).toFixed(1)}¢ → fill ${(fillPrice * 100).toFixed(1)}¢ (${CONFIG.slippageBps/100}% slippage)`)
+
+        logAudit(session.id, session.asset, 'MOMENTUM', 'ORDER_FILLED', tick, session.endTime, {
+          action: 'ORDER_FILLED',
+          reason: `${pending.type} confirmed after ${newTicks} ticks`,
+          orderType: pending.type,
+          orderSide: pending.side,
+          triggerPrice: pending.triggerPrice,
+          fillPrice,
+          shares: pending.targetShares,
+          slippageBps: CONFIG.slippageBps,
+        }, { severity: 'action' })
 
         const action: StrategyAction = {
           type: pending.type,
@@ -419,6 +522,21 @@ export function useLiveData() {
 
       // Still waiting for more ticks
       console.log(`[PENDING] ${session.asset} | ${pending.type} ${pending.side} - confirming ${newTicks}/${CONFIG.confirmationTicks} ticks at ${(currentPrice * 100).toFixed(1)}¢`)
+
+      // Log first confirmation tick for debugging
+      if (newTicks === 2) {
+        logAudit(session.id, session.asset, 'MOMENTUM', 'ORDER_CONFIRMING', tick, session.endTime, {
+          action: 'ORDER_CONFIRMING',
+          reason: `Waiting for ${CONFIG.confirmationTicks - newTicks} more ticks`,
+          orderType: pending.type,
+          orderSide: pending.side,
+          triggerPrice: pending.triggerPrice,
+          currentPrice,
+          confirmationTicks: newTicks,
+          requiredTicks: CONFIG.confirmationTicks,
+        }, { severity: 'info' })
+      }
+
       return { action: null, updatedOrder: { ...pending, confirmationTicks: newTicks } }
     },
     []
@@ -436,6 +554,31 @@ export function useLiveData() {
       const executionPrice = action.fillPrice || action.targetPrice
 
       console.log(`[PAPER TRADE] ${action.type} ${action.targetShares.toFixed(1)} ${action.side} @ ${(executionPrice * 100).toFixed(1)}¢ (trigger: ${(action.targetPrice * 100).toFixed(1)}¢)`)
+
+      // Log execution to audit log (only for valid execution types)
+      const tick = session.currentTick
+      const executionEventMap: Record<string, 'ENTER_EXECUTED' | 'SCALE_EXECUTED' | 'HEDGE_EXECUTED' | 'CLOSE_EXECUTED' | null> = {
+        'ENTER': 'ENTER_EXECUTED',
+        'SCALE': 'SCALE_EXECUTED',
+        'HEDGE': 'HEDGE_EXECUTED',
+        'CLOSE': 'CLOSE_EXECUTED',
+        'SOLD': null, // SOLD is dual-entry, not momentum
+        'NONE': null,
+      }
+      const executionEvent = executionEventMap[action.type]
+      if (tick && executionEvent) {
+        logAudit(session.id, session.asset, 'MOMENTUM', executionEvent, tick, session.endTime, {
+          action: executionEvent,
+          reason: action.reason,
+          execution: {
+            side: action.side,
+            shares: action.targetShares,
+            triggerPrice: action.targetPrice,
+            fillPrice: executionPrice,
+            slippageBps: CONFIG.slippageBps,
+          },
+        }, { severity: action.type === 'HEDGE' ? 'warning' : 'action' })
+      }
 
       if (action.type === "ENTER") {
         const fill: Fill = {
@@ -517,6 +660,23 @@ export function useLiveData() {
         console.log(`[HEDGE COMPLETE] ${session.asset} | Locked P&L: ${lockedPnl.toFixed(2)} | Now watching for re-entry`)
       }
 
+      // CLOSE action - Take Profit! Sell entire position
+      if (action.type === "CLOSE" && updated.primaryPosition) {
+        const pos = updated.primaryPosition
+        const sellPrice = executionPrice
+        const cost = pos.avgPrice * pos.totalShares
+        const revenue = sellPrice * pos.totalShares
+        const profit = revenue - cost
+
+        console.log(`[TAKE PROFIT] ${session.asset} | Sold ${pos.totalShares.toFixed(1)} ${pos.side} @ ${(sellPrice * 100).toFixed(1)}¢`)
+        console.log(`[TAKE PROFIT] ${session.asset} | Cost: $${cost.toFixed(2)} | Revenue: $${revenue.toFixed(2)} | Profit: $${profit.toFixed(2)}`)
+
+        updated.realizedPnl += profit
+        updated.primaryPosition = null
+        updated.entryPrice = null
+        updated.state = "CLOSED" // Fully closed - took profit!
+      }
+
       return updated
     },
     []
@@ -556,6 +716,18 @@ export function useLiveData() {
       return { ...session, state: "CLOSED" as const }
     }
 
+    // NOTE: Removed deduplication - it was blocking legitimate ticks and breaking the order flow
+    // The duplicate audit log entries are acceptable; broken trading is not
+
+    // Log SESSION_START on first tick for both strategies
+    const isFirstTick = session.priceHistory.length === 0 && newHistory.length > 0
+    if (isFirstTick) {
+      logAudit(session.id, session.asset, session.strategyType, 'SESSION_START', tick, session.endTime,
+        { action: 'SESSION_START', reason: `Started ${session.strategyType} session for ${session.asset}` },
+        { severity: 'info' }
+      )
+    }
+
     let updated: TradingSession = {
       ...session,
       currentTick: tick,
@@ -574,8 +746,15 @@ export function useLiveData() {
     // ===== STRATEGY DISPATCH =====
     if (updated.strategyType === 'DUAL_ENTRY') {
       // --- DUAL-ENTRY STRATEGY ---
+      const prevDualState = updated.dualEntryState
+
       if (checkForceExit(updated, tick)) {
         updated = executeForceExit(updated, tick)
+        // Log force exit
+        logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'FORCE_EXIT', tick, updated.endTime,
+          { action: 'FORCE_EXIT', reason: `Time expired - closed position` },
+          { severity: 'warning', outcome: { pnl: updated.realizedPnl } }
+        )
         return updated
       }
 
@@ -583,18 +762,53 @@ export function useLiveData() {
         const entryAction = checkDualEntry(updated, tick)
         if (entryAction) {
           updated = executeDualEntry(updated, tick)
+          // Log maker orders placed
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_PLACED', tick, updated.endTime,
+            { action: 'PLACE_MAKER_ORDERS', reason: 'Placing 4 limit orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢' },
+            { severity: 'action' }
+          )
         }
       }
 
       // Process maker order fills when in ENTERING state
       if (updated.dualEntryState === 'ENTERING') {
+        const prevState = updated.dualMakerState
         updated = processMakerFills(updated, tick)
+
+        // Log if state changed to WAITING_LOSER (both sides filled)
+        if (updated.dualEntryState === 'WAITING_LOSER' && prevDualState === 'ENTERING') {
+          const pos = updated.dualPosition
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_FILLED', tick, updated.endTime,
+            {
+              action: 'BOTH_SIDES_FILLED',
+              reason: `Position complete: YES @ ${((pos?.yesAvgPrice || 0) * 100).toFixed(0)}¢, NO @ ${((pos?.noAvgPrice || 0) * 100).toFixed(0)}¢`
+            },
+            { severity: 'action', position: { shares: pos?.yesShares } }
+          )
+        } else if (updated.dualMakerState?.filledYes !== prevState?.filledYes) {
+          // YES side filled
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_FILLED', tick, updated.endTime,
+            { action: 'YES_FILLED', reason: `YES maker order filled @ ${((updated.dualMakerState?.filledYes?.price || 0) * 100).toFixed(0)}¢` },
+            { severity: 'info' }
+          )
+        } else if (updated.dualMakerState?.filledNo !== prevState?.filledNo) {
+          // NO side filled
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_FILLED', tick, updated.endTime,
+            { action: 'NO_FILLED', reason: `NO maker order filled @ ${((updated.dualMakerState?.filledNo?.price || 0) * 100).toFixed(0)}¢` },
+            { severity: 'info' }
+          )
+        }
       }
 
       if (updated.dualEntryState === 'WAITING_LOSER') {
         const loserCheck = checkLoserExit(updated, tick)
         if (loserCheck) {
           updated = executeLoserExit(updated, loserCheck.side, loserCheck.price)
+          // Log loser exit
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'LOSER_EXIT', tick, updated.endTime,
+            { action: 'SELL_LOSER', reason: `Sold loser ${loserCheck.side} @ ${(loserCheck.price * 100).toFixed(1)}¢` },
+            { severity: 'action', outcome: { fillPrice: loserCheck.price } }
+          )
         }
       }
 
@@ -602,6 +816,11 @@ export function useLiveData() {
         const winnerCheck = checkWinnerExit(updated, tick)
         if (winnerCheck) {
           updated = executeWinnerExit(updated, winnerCheck.price)
+          // Log winner exit
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'WINNER_EXIT', tick, updated.endTime,
+            { action: 'SELL_WINNER', reason: `Sold winner @ ${(winnerCheck.price * 100).toFixed(1)}¢` },
+            { severity: updated.realizedPnl >= 0 ? 'profit' : 'loss', outcome: { fillPrice: winnerCheck.price, pnl: updated.realizedPnl } }
+          )
         }
       }
 
@@ -609,17 +828,27 @@ export function useLiveData() {
 
     } else {
       // --- MOMENTUM STRATEGY ---
+      // Debug: log every 10th tick
+      if (updated.priceHistory.length % 10 === 0) {
+        console.log(`[MOMENTUM] ${updated.asset} | state=${updated.state} | pending=${updated.pendingOrder?.type || 'none'} | YES=${(tick.yesPrice * 100).toFixed(1)}¢ NO=${(tick.noPrice * 100).toFixed(1)}¢`)
+      }
+
       if (updated.pendingOrder) {
+        console.log(`[MOMENTUM] ${updated.asset} | Processing pending ${updated.pendingOrder.type} order...`)
         const { action, updatedOrder } = processPendingOrder(updated, tick)
         updated.pendingOrder = updatedOrder
         if (action) {
+          console.log(`[MOMENTUM] ${updated.asset} | ACTION RETURNED: ${action.type} ${action.side}`)
           updated = executeAction(updated, action)
+        } else if (!updatedOrder) {
+          console.log(`[MOMENTUM] ${updated.asset} | Order was CANCELLED`)
         }
       }
 
       if (!updated.pendingOrder) {
         const newOrder = checkForNewOrder(updated, tick)
         if (newOrder) {
+          console.log(`[MOMENTUM] ${updated.asset} | NEW ORDER CREATED: ${newOrder.type} ${newOrder.side} @ ${(newOrder.triggerPrice * 100).toFixed(1)}¢`)
           updated.pendingOrder = newOrder
         }
       }
@@ -834,7 +1063,29 @@ export function useLiveData() {
           console.log(`[LIVE] Creating ${newSessions.length} new sessions:`, newSessions.map(s => `${s.asset}-${s.strategyType}`))
           updated = [...updated, ...newSessions]
 
+          // IMPORTANT: Ensure every market has BOTH strategy types
+          // Check for markets that only have momentum but not dual-entry
+          const marketIds = new Set(updated.map(s => s.marketId))
+          for (const marketId of marketIds) {
+            const marketSessions = updated.filter(s => s.marketId === marketId)
+            const hasMomentum = marketSessions.some(s => s.strategyType === 'MOMENTUM')
+            const hasDualEntry = marketSessions.some(s => s.strategyType === 'DUAL_ENTRY')
+
+            if (hasMomentum && !hasDualEntry) {
+              // Missing dual-entry - create it
+              const market = marketsRef.current.get(marketId)
+              if (market) {
+                console.log(`[LIVE] Missing DUAL_ENTRY for ${market.asset}, creating...`)
+                updated.push(createSessionForStrategy(market, 'DUAL_ENTRY'))
+              }
+            }
+          }
+
           console.log(`[LIVE] Total sessions after update: ${updated.length}`)
+          console.log(`[LIVE] Sessions by type:`, {
+            momentum: updated.filter(s => s.strategyType === 'MOMENTUM').length,
+            dualEntry: updated.filter(s => s.strategyType === 'DUAL_ENTRY').length,
+          })
           return updated
         })
 
@@ -869,11 +1120,23 @@ export function useLiveData() {
             connectWebSocket(allTokenIds)
           }
 
-          // Also fetch initial prices for new markets via REST (after a small delay to let state settle)
+          // Also fetch initial prices AND price history for new markets via REST
           setTimeout(async () => {
             for (const m of newMarkets) {
               try {
-                const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}`)
+                // Fetch saved price history from backend first
+                const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
+                let savedHistory: PriceTick[] = []
+                if (historyRes.ok) {
+                  const historyData = await historyRes.json()
+                  if (historyData.ticks && historyData.ticks.length > 0) {
+                    savedHistory = historyData.ticks
+                    console.log(`[LIVE] Loaded ${savedHistory.length} historical ticks for ${m.asset}`)
+                  }
+                }
+
+                // Fetch current price
+                const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}?marketId=${m.conditionId}`)
                 if (priceRes.ok) {
                   const priceData = await priceRes.json()
                   console.log(`[LIVE] Got initial price for ${m.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
@@ -885,7 +1148,7 @@ export function useLiveData() {
                     timestamp: Date.now()
                   })
 
-                  // Update global history and session
+                  // Create current tick
                   const tick: PriceTick = {
                     timestamp: Date.now(),
                     yesPrice: priceData.yesPrice,
@@ -893,21 +1156,22 @@ export function useLiveData() {
                     yesLiquidity: priceData.yesLiquidity || 100,
                     noLiquidity: priceData.noLiquidity || 100,
                   }
-                  const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
-                  const newHistory = [...existingHistory.slice(-500), tick]
-                  priceHistoryRef.current.set(m.conditionId, newHistory)
+
+                  // Combine saved history with current tick
+                  const combinedHistory = [...savedHistory, tick].slice(-500)
+                  priceHistoryRef.current.set(m.conditionId, combinedHistory)
 
                   setSessions(prev => prev.map(session => {
                     if (session.marketId !== m.conditionId) return session
                     return {
                       ...session,
                       currentTick: tick,
-                      priceHistory: newHistory,
+                      priceHistory: combinedHistory,
                     }
                   }))
                 }
               } catch (e) {
-                console.log(`[LIVE] Failed to get initial price for ${m.asset}`)
+                console.log(`[LIVE] Failed to get initial price for ${m.asset}:`, e)
               }
             }
           }, 500)
@@ -929,12 +1193,24 @@ export function useLiveData() {
         }
         connectWebSocket(tokenIds)
 
-        // Fetch initial prices for all markets on initial load
+        // Fetch initial prices AND price history for all markets on initial load
         setTimeout(async () => {
-          console.log(`[LIVE] Fetching initial prices for ${markets.length} markets...`)
+          console.log(`[LIVE] Fetching initial prices and history for ${markets.length} markets...`)
           for (const m of markets) {
             try {
-              const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}`)
+              // Fetch saved price history from backend first
+              const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
+              let savedHistory: PriceTick[] = []
+              if (historyRes.ok) {
+                const historyData = await historyRes.json()
+                if (historyData.ticks && historyData.ticks.length > 0) {
+                  savedHistory = historyData.ticks
+                  console.log(`[LIVE] Loaded ${savedHistory.length} historical ticks for ${m.asset}`)
+                }
+              }
+
+              // Fetch current price
+              const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}?marketId=${m.conditionId}`)
               if (priceRes.ok) {
                 const priceData = await priceRes.json()
                 console.log(`[LIVE] Initial price for ${m.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
@@ -945,7 +1221,7 @@ export function useLiveData() {
                   timestamp: Date.now()
                 })
 
-                // Update global history and all sessions for this market
+                // Create current tick
                 const tick: PriceTick = {
                   timestamp: Date.now(),
                   yesPrice: priceData.yesPrice,
@@ -953,16 +1229,17 @@ export function useLiveData() {
                   yesLiquidity: priceData.yesLiquidity || 100,
                   noLiquidity: priceData.noLiquidity || 100,
                 }
-                const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
-                const newHistory = [...existingHistory.slice(-500), tick]
-                priceHistoryRef.current.set(m.conditionId, newHistory)
+
+                // Combine saved history with current tick
+                const combinedHistory = [...savedHistory, tick].slice(-500)
+                priceHistoryRef.current.set(m.conditionId, combinedHistory)
 
                 setSessions(prev => prev.map(session => {
                   if (session.marketId !== m.conditionId) return session
                   return {
                     ...session,
                     currentTick: tick,
-                    priceHistory: newHistory,
+                    priceHistory: combinedHistory,
                   }
                 }))
               }
@@ -1076,7 +1353,8 @@ export function useLiveData() {
 
       for (const [conditionId, market] of marketsRef.current.entries()) {
         try {
-          const priceRes = await fetch(`${API_URL}/price/${market.yesTokenId}/${market.noTokenId}`)
+          // Pass marketId to backend for price history storage
+          const priceRes = await fetch(`${API_URL}/price/${market.yesTokenId}/${market.noTokenId}?marketId=${conditionId}`)
           if (!priceRes.ok || !mounted) continue
 
           const priceData = await priceRes.json()

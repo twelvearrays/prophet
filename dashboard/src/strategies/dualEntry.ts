@@ -135,6 +135,16 @@ export function checkDualEntry(
 
 /**
  * Check if any pending maker orders should fill based on current price
+ *
+ * PAPER TRADING MODE: Simulates realistic maker order fills.
+ *
+ * In real trading:
+ * - A BID at 46¢ fills when someone SELLS into it (price crosses DOWN through 46¢)
+ * - We need to track if price has CROSSED our order level, not just if it's near it
+ *
+ * For paper trading, we fill when:
+ * - Market price is within a small range of our order price (simulating the cross)
+ * - Price must be in a reasonable range (35¢-65¢) to avoid filling when market is decided
  */
 export function checkMakerFills(
   session: TradingSession,
@@ -146,14 +156,23 @@ export function checkMakerFills(
   const filled: MakerOrder[] = []
   const stillPending: MakerOrder[] = []
 
+  // Only try to fill when market is undecided (prices near 50%)
+  // If YES is 27¢ or NO is 74¢, the market has already moved - don't fake fill
+  const marketUndecided = tick.yesPrice >= 0.35 && tick.yesPrice <= 0.65
+
+  // Fill tolerance: how close does price need to be to our order?
+  const FILL_TOLERANCE = 0.05 // 5¢ tolerance
+
   for (const order of state.pendingOrders) {
-    // A BID (buy) fills when market ask price drops to or below our bid
-    // YES bid fills when yesPrice <= our bid price
-    // NO bid fills when noPrice <= our bid price
     const marketPrice = order.side === 'YES' ? tick.yesPrice : tick.noPrice
 
-    if (marketPrice <= order.price) {
-      // Our bid got filled!
+    // Only fill if:
+    // 1. Market is undecided (neither side has run away)
+    // 2. Market price is within tolerance of our order price
+    const priceNearOrder = Math.abs(marketPrice - order.price) <= FILL_TOLERANCE
+    const shouldFill = marketUndecided && priceNearOrder
+
+    if (shouldFill) {
       console.log(`[DUAL MAKER] ${session.asset} | ${order.side} bid FILLED @ ${(order.price * 100).toFixed(0)}¢ (market: ${(marketPrice * 100).toFixed(1)}¢)`)
       filled.push({ ...order, status: 'FILLED' })
     } else {
@@ -405,7 +424,7 @@ export function executeLoserExit(
 
   const now = Date.now()
   const loserAction = {
-    type: 'HEDGE' as const, // Using HEDGE type to indicate exit/sell
+    type: 'SOLD' as const, // Dual-entry sells loser, not hedging
     side: loserSide,
     reason: `Sold loser ${loserSide} @ ${(actualPrice * 100).toFixed(1)}¢ (-${lossPct}%)`,
     targetPrice: actualPrice,
@@ -544,7 +563,7 @@ export function executeForceExit(
     console.log(`[DUAL FORCE EXIT] ${session.asset} | Time expired - cancelling maker orders`)
     const now = Date.now()
     const cancelAction = {
-      type: 'HEDGE' as const,
+      type: 'CLOSE' as const,
       side: 'YES' as const,
       reason: `Time expired: cancelled pending maker orders`,
       targetPrice: 0,
@@ -588,7 +607,7 @@ export function executeForceExit(
     const now = Date.now()
     const forceExitActions = [
       {
-        type: 'HEDGE' as const,
+        type: 'CLOSE' as const,
         side: 'YES' as const,
         reason: `Force exit: sold YES @ ${(yesPrice * 100).toFixed(1)}¢ (time expired)`,
         targetPrice: yesPrice,
@@ -597,7 +616,7 @@ export function executeForceExit(
         fillPrice: yesPrice,
       },
       {
-        type: 'HEDGE' as const,
+        type: 'CLOSE' as const,
         side: 'NO' as const,
         reason: `Force exit: sold NO @ ${(noPrice * 100).toFixed(1)}¢ | Final P&L: $${profit.toFixed(2)}`,
         targetPrice: noPrice,

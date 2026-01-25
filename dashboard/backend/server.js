@@ -9,6 +9,7 @@ import http from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
 import { ClobClient } from '@polymarket/clob-client';
 import * as trading from './trading.js';
+import * as priceHistory from './priceHistory.js';
 
 const app = express();
 const PORT = 3001;
@@ -18,10 +19,67 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize CLOB client (read-only, no wallet needed for public data)
-const clobClient = new ClobClient(
+const rawClobClient = new ClobClient(
   'https://clob.polymarket.com',
   137 // Polygon chain ID
 );
+
+// Wrapper to suppress verbose CLOB client error logs for expected 404s
+// The library logs full request configs which spam the console
+const clobClient = {
+  async getOrderBook(tokenId) {
+    const originalError = console.error;
+    console.error = (...args) => {
+      // Suppress CLOB Client request error logs (they're verbose and expected for new markets)
+      if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
+        return;
+      }
+      originalError.apply(console, args);
+    };
+    try {
+      return await rawClobClient.getOrderBook(tokenId);
+    } finally {
+      console.error = originalError;
+    }
+  },
+  async getMidpoint(tokenId) {
+    const originalError = console.error;
+    console.error = (...args) => {
+      if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
+        return;
+      }
+      originalError.apply(console, args);
+    };
+    try {
+      return await rawClobClient.getMidpoint(tokenId);
+    } finally {
+      console.error = originalError;
+    }
+  },
+  async getSpread(tokenId) {
+    const originalError = console.error;
+    console.error = (...args) => {
+      if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
+        return;
+      }
+      originalError.apply(console, args);
+    };
+    try {
+      return await rawClobClient.getSpread(tokenId);
+    } finally {
+      console.error = originalError;
+    }
+  },
+  async getMarket(conditionId) {
+    return rawClobClient.getMarket(conditionId);
+  },
+  async getMarkets() {
+    return rawClobClient.getMarkets();
+  },
+  async getSimplifiedMarkets() {
+    return rawClobClient.getSimplifiedMarkets();
+  },
+};
 
 // Gamma API for market discovery
 const GAMMA_API = 'https://gamma-api.polymarket.com';
@@ -188,6 +246,9 @@ function processOrderbook(data) {
   broadcastToSubscribers(tokenId, tick);
 }
 
+// Map tokenId to marketId for price history storage
+const tokenToMarket = new Map();
+
 function broadcastToSubscribers(tokenId, data) {
   const clients = subscriptions.get(tokenId);
   if (!clients) return;
@@ -197,6 +258,13 @@ function broadcastToSubscribers(tokenId, data) {
     if (client.readyState === WebSocket.OPEN) {
       client.send(message);
     }
+  }
+
+  // Store price in history (need to map tokenId to marketId)
+  const marketId = tokenToMarket.get(tokenId);
+  if (marketId && data.bestAsk !== null) {
+    // We need both YES and NO prices for a complete tick
+    // Store partial data, will be combined in the price endpoint
   }
 }
 
@@ -746,7 +814,7 @@ app.get('/api/price/:yesTokenId/:noTokenId', async (req, res) => {
       0
     );
 
-    res.json({
+    const priceData = {
       timestamp: Date.now(),
       yesPrice: yesAsk,
       noPrice: noAsk,
@@ -754,7 +822,16 @@ app.get('/api/price/:yesTokenId/:noTokenId', async (req, res) => {
       noBid,
       yesLiquidity,
       noLiquidity,
-    });
+    };
+
+    // Store in price history (use a combined key for the market)
+    // The marketId can be derived from the request or passed as query param
+    const marketId = req.query.marketId;
+    if (marketId) {
+      priceHistory.addPriceTick(marketId, priceData);
+    }
+
+    res.json(priceData);
   } catch (error) {
     console.error('[API] Error fetching price:', error);
     res.status(500).json({ error: error.message });
@@ -783,6 +860,36 @@ app.get('/api/spread/:tokenId', async (req, res) => {
     console.error('[API] Error fetching spread:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+// ============================================================================
+// PRICE HISTORY ENDPOINTS
+// ============================================================================
+
+// Get price history for a market
+app.get('/api/price-history/:marketId', (req, res) => {
+  const { marketId } = req.params;
+  const history = priceHistory.getPriceHistory(marketId);
+  res.json(history);
+});
+
+// Get all price histories (summary)
+app.get('/api/price-history', (req, res) => {
+  const histories = priceHistory.getAllPriceHistories();
+  res.json({ histories, count: histories.length });
+});
+
+// Clear price history for a market
+app.delete('/api/price-history/:marketId', (req, res) => {
+  const { marketId } = req.params;
+  priceHistory.clearHistory(marketId);
+  res.json({ success: true, marketId });
+});
+
+// Force save all price histories
+app.post('/api/price-history/save', (req, res) => {
+  priceHistory.saveAll();
+  res.json({ success: true, timestamp: Date.now() });
 });
 
 // ============================================================================
@@ -1110,6 +1217,62 @@ app.post('/api/trading/exit', async (req, res) => {
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
+});
+
+// ============================================================================
+// CONFIG & RESTART ENDPOINTS
+// ============================================================================
+
+// Store current config (in-memory, frontend is source of truth via localStorage)
+let currentConfig = null;
+
+// Get config
+app.get('/api/config', (req, res) => {
+  res.json(currentConfig || { message: 'No config synced yet' });
+});
+
+// Sync config from frontend
+app.post('/api/config', (req, res) => {
+  currentConfig = req.body;
+  console.log('[CONFIG] Config synced from frontend:', {
+    momentum: {
+      takeProfitEnabled: currentConfig?.momentum?.takeProfitEnabled,
+      takeProfitThreshold: currentConfig?.momentum?.takeProfitThreshold,
+      maxHedges: currentConfig?.momentum?.maxHedges,
+    },
+    dualEntry: {
+      loserDropPct: currentConfig?.dualEntry?.loserDropPct,
+      winnerGainPct: currentConfig?.dualEntry?.winnerGainPct,
+    },
+    system: {
+      paperTrading: currentConfig?.system?.paperTrading,
+      autoRestartOnNewMarket: currentConfig?.system?.autoRestartOnNewMarket,
+    },
+  });
+  res.json({ success: true, timestamp: Date.now() });
+});
+
+// Restart sessions (clears state, frontend will re-initialize)
+app.post('/api/restart', (req, res) => {
+  console.log('[RESTART] Session restart requested');
+
+  // Clear all subscriptions
+  for (const tokenId of subscriptions.keys()) {
+    subscriptions.delete(tokenId);
+  }
+  pendingSubscriptions.clear();
+
+  // Notify all connected clients to reinitialize
+  wss.clients.forEach((client) => {
+    if (client.readyState === WebSocket.OPEN) {
+      client.send(JSON.stringify({ type: 'restart', timestamp: Date.now() }));
+    }
+  });
+
+  // Reconnect to Polymarket
+  connectToPolymarket();
+
+  res.json({ success: true, message: 'Sessions restarted', timestamp: Date.now() });
 });
 
 // ============================================================================

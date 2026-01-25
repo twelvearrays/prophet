@@ -19,7 +19,7 @@ const stateConfig: Record<string, { label: string; className: string }> = {
   ENTRY: { label: "Entry", className: "border-emerald-500/30 text-emerald-400 bg-emerald-500/10" },
   SCALING: { label: "Scaling", className: "border-cyan-500/30 text-cyan-400 bg-cyan-500/10" },
   HEDGED: { label: "Hedged", className: "border-amber-500/30 text-amber-400 bg-amber-500/10" },
-  CLOSED: { label: "Closed", className: "border-zinc-500/30 text-zinc-400" },
+  CLOSED: { label: "Closed", className: "border-rose-500/30 text-rose-400 bg-rose-500/10" },
   // Dual-entry strategy states
   ENTERING: { label: "Entering", className: "border-purple-500/30 text-purple-400 bg-purple-500/10 animate-pulse" },
   WAITING_LOSER: { label: "Hedged ⚖️", className: "border-purple-500/30 text-purple-400 bg-purple-500/10" },
@@ -44,8 +44,16 @@ function SideBadge({ side, shares }: { side: "YES" | "NO"; shares: number }) {
 }
 
 export function SessionCard({ session, selected, onClick, compact }: SessionCardProps) {
-  const isProfitable = session.currentPnl >= 0
   const isDualEntry = session.strategyType === 'DUAL_ENTRY'
+
+  // Check if session is closed
+  const isClosed = session.state === 'CLOSED' || session.dualEntryState === 'CLOSED'
+
+  // For closed sessions, use realizedPnl (frozen). For active, use currentPnl + realizedPnl
+  const displayPnl = isClosed
+    ? session.realizedPnl
+    : session.currentPnl + session.realizedPnl
+  const isProfitable = displayPnl >= 0
 
   // Show special states based on current situation
   let displayState: string = session.state
@@ -158,9 +166,11 @@ export function SessionCard({ session, selected, onClick, compact }: SessionCard
 
           {/* P&L row */}
           <div className="flex items-center justify-between pt-1 border-t border-zinc-800">
-            <span className="text-[10px] text-zinc-500 uppercase">P&L</span>
+            <span className="text-[10px] text-zinc-500 uppercase">
+              {isClosed ? "Final P&L" : "P&L"}
+            </span>
             <span className={`font-mono text-sm font-bold ${isProfitable ? "text-emerald-400" : "text-rose-400"}`}>
-              {formatMoney(session.currentPnl + session.realizedPnl)}
+              {formatMoney(displayPnl)}
             </span>
           </div>
 
@@ -281,9 +291,11 @@ export function SessionCard({ session, selected, onClick, compact }: SessionCard
         </div>
         <div className="mt-3 pt-3 border-t border-zinc-800">
           <div className="flex justify-between items-center">
-            <span className="text-zinc-500 text-xs uppercase tracking-wide">Unrealized P&L</span>
+            <span className="text-zinc-500 text-xs uppercase tracking-wide">
+              {isClosed ? "Final P&L" : "Unrealized P&L"}
+            </span>
             <span className={`font-mono font-medium ${isProfitable ? "text-emerald-400" : "text-rose-400"}`}>
-              {formatMoney(session.currentPnl)}
+              {formatMoney(displayPnl)}
             </span>
           </div>
         </div>

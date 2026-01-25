@@ -4,11 +4,16 @@ import { KPICard } from "@/components/dashboard/KPICard"
 import { SessionCard } from "@/components/dashboard/SessionCard"
 import { SessionDetail } from "@/components/dashboard/SessionDetail"
 import { StrategyRecap } from "@/components/dashboard/StrategyRecap"
+import { ConfigPanel } from "@/components/dashboard/ConfigPanel"
+import { AuditLog } from "@/components/dashboard/AuditLog"
+import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
 import { useSimulation } from "@/hooks/useSimulation"
 import { useLiveData } from "@/hooks/useLiveData"
 
 function App() {
   const [mode, setMode] = useState<"simulation" | "live">("live")
+  const [showConfig, setShowConfig] = useState(false)
+  const [showAuditLog, setShowAuditLog] = useState(false)
 
   const simulation = useSimulation()
   const live = useLiveData()
@@ -36,19 +41,11 @@ function App() {
     return () => clearInterval(interval)
   }, [])
 
-  // Filter sessions: only show active ones (time remaining > 0)
+  // Filter sessions: show all sessions while market window is active
+  // Only hide after the 15-minute window expires
   const activeSessions = useMemo(() => {
     const now = Date.now()
-    return sessions.filter(s => {
-      // Must have time remaining
-      if (s.endTime <= now) return false
-      // For dual-entry, check dualEntryState
-      if (s.strategyType === 'DUAL_ENTRY') {
-        return s.dualEntryState !== 'CLOSED'
-      }
-      // For momentum, check state
-      return s.state !== "CLOSED"
-    })
+    return sessions.filter(s => s.endTime > now)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, Math.floor(Date.now() / 1000)]) // Re-evaluate every second
 
@@ -122,52 +119,34 @@ function App() {
               </div>
             )}
           </div>
-          {mode === "live" && (
-            <span className="text-xs text-zinc-500">
-              Prices from Polymarket • No real orders
-            </span>
-          )}
-        </div>
-
-        {/* Strategy Comparison Stats */}
-        {mode === "live" && strategyMode === "compare" && strategyStats && (
-          <div className="grid grid-cols-2 gap-4">
-            <div className={`p-3 rounded-lg border ${
-              strategyStats.momentum.pnl >= strategyStats.dualEntry.pnl
-                ? "border-emerald-500/50 bg-emerald-500/5"
-                : "border-zinc-700/50 bg-zinc-800/30"
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-emerald-400 font-medium">Momentum</span>
-                  <span className="text-xs text-zinc-500">({strategyStats.momentum.activeSessions} active)</span>
-                </div>
-                <span className={`font-mono font-medium ${
-                  strategyStats.momentum.pnl >= 0 ? "text-emerald-400" : "text-rose-400"
-                }`}>
-                  {strategyStats.momentum.pnl >= 0 ? "+" : ""}${strategyStats.momentum.pnl.toFixed(2)}
-                </span>
-              </div>
-            </div>
-            <div className={`p-3 rounded-lg border ${
-              strategyStats.dualEntry.pnl > strategyStats.momentum.pnl
-                ? "border-purple-500/50 bg-purple-500/5"
-                : "border-zinc-700/50 bg-zinc-800/30"
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <span className="text-purple-400 font-medium">Dual-Entry</span>
-                  <span className="text-xs text-zinc-500">({strategyStats.dualEntry.activeSessions} active)</span>
-                </div>
-                <span className={`font-mono font-medium ${
-                  strategyStats.dualEntry.pnl >= 0 ? "text-emerald-400" : "text-rose-400"
-                }`}>
-                  {strategyStats.dualEntry.pnl >= 0 ? "+" : ""}${strategyStats.dualEntry.pnl.toFixed(2)}
-                </span>
-              </div>
-            </div>
+          <div className="flex items-center gap-3">
+            {mode === "live" && (
+              <span className="text-xs text-zinc-500">
+                Prices from Polymarket • No real orders
+              </span>
+            )}
+            <button
+              onClick={() => setShowAuditLog(!showAuditLog)}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${
+                showAuditLog
+                  ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
+                  : "bg-zinc-800 text-zinc-400 hover:text-zinc-300 border border-zinc-700"
+              }`}
+            >
+              📋 Audit
+            </button>
+            <button
+              onClick={() => setShowConfig(!showConfig)}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${
+                showConfig
+                  ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/30"
+                  : "bg-zinc-800 text-zinc-400 hover:text-zinc-300 border border-zinc-700"
+              }`}
+            >
+              ⚙️ Config
+            </button>
           </div>
-        )}
+        </div>
 
         {/* Error Banner */}
         {error && (
@@ -199,9 +178,23 @@ function App() {
           <KPICard label="Win Rate" value={stats.winRate} suffix="%" />
         </div>
 
-        {/* Strategy Recap Panel */}
-        {mode === "live" && (
-          <StrategyRecap sessions={sessions} strategyMode={strategyMode} />
+        {/* Config Panel (Collapsible) */}
+        {showConfig && (
+          <div className="mb-4">
+            <ConfigPanel />
+          </div>
+        )}
+
+        {/* Audit Log Panel (Collapsible) */}
+        {showAuditLog && (
+          <div className="mb-4 grid grid-cols-12 gap-4">
+            <div className="col-span-8">
+              <AuditLog maxHeight="300px" />
+            </div>
+            <div className="col-span-4">
+              <AIReviewPrompt />
+            </div>
+          </div>
         )}
 
         {/* Main Grid */}
@@ -260,6 +253,55 @@ function App() {
             <SessionDetail session={selectedSession} />
           </div>
         </div>
+
+        {/* Strategy Recap Panel - Bottom */}
+        {mode === "live" && (
+          <StrategyRecap sessions={sessions} strategyMode={strategyMode} />
+        )}
+
+        {/* Strategy Comparison Stats - Bottom */}
+        {mode === "live" && strategyMode === "compare" && strategyStats && (
+          <div className="grid grid-cols-2 gap-4 mt-4">
+            <div className={`p-4 rounded-lg border ${
+              strategyStats.momentum.pnl >= strategyStats.dualEntry.pnl
+                ? "border-emerald-500/50 bg-emerald-500/5"
+                : "border-zinc-700/50 bg-zinc-800/30"
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">🚀</span>
+                  <span className="text-emerald-400 font-medium">Momentum</span>
+                  <span className="text-xs text-zinc-500">({strategyStats.momentum.activeSessions} active)</span>
+                </div>
+                <span className={`font-mono text-lg font-medium ${
+                  strategyStats.momentum.pnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}>
+                  {strategyStats.momentum.pnl >= 0 ? "+" : ""}${strategyStats.momentum.pnl.toFixed(2)}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-500 mt-2">Ride the momentum when one side crosses 65¢</p>
+            </div>
+            <div className={`p-4 rounded-lg border ${
+              strategyStats.dualEntry.pnl > strategyStats.momentum.pnl
+                ? "border-purple-500/50 bg-purple-500/5"
+                : "border-zinc-700/50 bg-zinc-800/30"
+            }`}>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg">⚖️</span>
+                  <span className="text-purple-400 font-medium">Dual-Entry</span>
+                  <span className="text-xs text-zinc-500">({strategyStats.dualEntry.activeSessions} active)</span>
+                </div>
+                <span className={`font-mono text-lg font-medium ${
+                  strategyStats.dualEntry.pnl >= 0 ? "text-emerald-400" : "text-rose-400"
+                }`}>
+                  {strategyStats.dualEntry.pnl >= 0 ? "+" : ""}${strategyStats.dualEntry.pnl.toFixed(2)}
+                </span>
+              </div>
+              <p className="text-xs text-zinc-500 mt-2">Profit from movement, not direction. Maker orders at 46¢ & 54¢.</p>
+            </div>
+          </div>
+        )}
       </main>
     </div>
   )
