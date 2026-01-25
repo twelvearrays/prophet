@@ -1160,11 +1160,17 @@ export function useLiveData() {
                 // Fetch saved price history from backend first
                 const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
                 let savedHistory: PriceTick[] = []
+                const sessionStart = m.startTime ? new Date(m.startTime).getTime() : Date.now()
+                const sessionEnd = new Date(m.endTime).getTime()
+
                 if (historyRes.ok) {
                   const historyData = await historyRes.json()
                   if (historyData.ticks && historyData.ticks.length > 0) {
-                    savedHistory = historyData.ticks
-                    console.log(`[LIVE] Loaded ${savedHistory.length} historical ticks for ${m.asset}`)
+                    // Filter to only include ticks within THIS session's time window
+                    savedHistory = historyData.ticks.filter((tick: PriceTick) =>
+                      tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
+                    )
+                    console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${m.asset} (filtered to session window)`)
                   }
                 }
 
@@ -1249,11 +1255,17 @@ export function useLiveData() {
               // Fetch saved price history from backend first
               const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
               let savedHistory: PriceTick[] = []
+              const sessionStart = m.startTime ? new Date(m.startTime).getTime() : Date.now()
+              const sessionEnd = new Date(m.endTime).getTime()
+
               if (historyRes.ok) {
                 const historyData = await historyRes.json()
                 if (historyData.ticks && historyData.ticks.length > 0) {
-                  savedHistory = historyData.ticks
-                  console.log(`[LIVE] Loaded ${savedHistory.length} historical ticks for ${m.asset}`)
+                  // Filter to only include ticks within THIS session's time window
+                  savedHistory = historyData.ticks.filter((tick: PriceTick) =>
+                    tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
+                  )
+                  console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${m.asset} (filtered to session window)`)
                 }
               }
 
