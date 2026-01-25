@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { ClobClient } from '@polymarket/clob-client';
 import * as trading from './trading.js';
 import * as priceHistory from './priceHistory.js';
+import * as auditStorage from './auditStorage.js';
 
 const app = express();
 const PORT = 3001;
@@ -247,7 +248,9 @@ function processOrderbook(data) {
 }
 
 // Map tokenId to marketId for price history storage
-const tokenToMarket = new Map();
+const tokenToMarket = new Map(); // tokenId -> { marketId, side: 'YES' | 'NO' }
+// Track latest prices per market for combining YES/NO into ticks
+const latestPrices = new Map(); // marketId -> { yesPrice, noPrice, yesLiquidity, noLiquidity, timestamp }
 
 function broadcastToSubscribers(tokenId, data) {
   const clients = subscriptions.get(tokenId);
@@ -260,11 +263,40 @@ function broadcastToSubscribers(tokenId, data) {
     }
   }
 
-  // Store price in history (need to map tokenId to marketId)
-  const marketId = tokenToMarket.get(tokenId);
-  if (marketId && data.bestAsk !== null) {
-    // We need both YES and NO prices for a complete tick
-    // Store partial data, will be combined in the price endpoint
+  // Store price in history - combine YES/NO into market ticks
+  const tokenInfo = tokenToMarket.get(tokenId);
+  if (tokenInfo && data.bestAsk !== null) {
+    const { marketId, side } = tokenInfo;
+
+    // Get or create price entry for this market
+    let prices = latestPrices.get(marketId);
+    if (!prices) {
+      prices = { yesPrice: 0.5, noPrice: 0.5, yesLiquidity: 100, noLiquidity: 100, timestamp: 0 };
+      latestPrices.set(marketId, prices);
+    }
+
+    // Update the appropriate side
+    if (side === 'YES') {
+      prices.yesPrice = data.bestAsk;
+      prices.yesLiquidity = data.liquidity || 100;
+    } else {
+      prices.noPrice = data.bestAsk;
+      prices.noLiquidity = data.liquidity || 100;
+    }
+    prices.timestamp = data.timestamp;
+
+    // Store combined tick to price history (throttled - only if 500ms since last)
+    const lastStoredTime = prices.lastStoredTime || 0;
+    if (data.timestamp - lastStoredTime >= 500) {
+      prices.lastStoredTime = data.timestamp;
+      priceHistory.addPriceTick(marketId, {
+        timestamp: data.timestamp,
+        yesPrice: prices.yesPrice,
+        noPrice: prices.noPrice,
+        yesLiquidity: prices.yesLiquidity,
+        noLiquidity: prices.noLiquidity,
+      });
+    }
   }
 }
 
@@ -625,6 +657,13 @@ app.get('/api/markets/crypto-15m', async (req, res) => {
     }
 
     console.log(`[API] Returning ${markets.length} active markets (filtered out upcoming)`);
+
+    // Register token -> market mapping for price history storage
+    for (const m of markets) {
+      tokenToMarket.set(m.yesTokenId, { marketId: m.conditionId, side: 'YES' });
+      tokenToMarket.set(m.noTokenId, { marketId: m.conditionId, side: 'NO' });
+    }
+
     res.json(markets);
   } catch (error) {
     console.error('[API] Error fetching markets:', error);
@@ -699,6 +738,13 @@ app.get('/api/markets/crypto-hourly', async (req, res) => {
     }
 
     console.log(`[API] Returning ${markets.length} active hourly markets`);
+
+    // Register token -> market mapping for price history storage
+    for (const m of markets) {
+      tokenToMarket.set(m.yesTokenId, { marketId: m.conditionId, side: 'YES' });
+      tokenToMarket.set(m.noTokenId, { marketId: m.conditionId, side: 'NO' });
+    }
+
     res.json(markets);
   } catch (error) {
     console.error('[API] Error fetching hourly markets:', error);
@@ -1276,8 +1322,93 @@ app.post('/api/restart', (req, res) => {
 });
 
 // ============================================================================
+// AUDIT LOG ENDPOINTS
+// ============================================================================
+
+// Log an audit entry
+app.post('/api/audit/log', (req, res) => {
+  const entry = auditStorage.logEntry(req.body);
+  if (entry) {
+    res.json({ success: true, entry });
+  } else {
+    res.status(500).json({ success: false, error: 'Failed to log entry' });
+  }
+});
+
+// Get sessions list
+app.get('/api/audit/sessions', (req, res) => {
+  const limit = parseInt(req.query.limit) || 100;
+  const offset = parseInt(req.query.offset) || 0;
+  const sessions = auditStorage.getSessions(limit, offset);
+  res.json({ sessions, count: sessions.length });
+});
+
+// Get single session
+app.get('/api/audit/sessions/:sessionId', (req, res) => {
+  const session = auditStorage.getSession(req.params.sessionId);
+  if (session) {
+    res.json(session);
+  } else {
+    res.status(404).json({ error: 'Session not found' });
+  }
+});
+
+// Get session entries
+app.get('/api/audit/sessions/:sessionId/entries', (req, res) => {
+  const limit = parseInt(req.query.limit) || 500;
+  const entries = auditStorage.getSessionEntries(req.params.sessionId, limit);
+  res.json({ entries, count: entries.length });
+});
+
+// Export session to markdown (for AI review)
+app.get('/api/audit/sessions/:sessionId/markdown', (req, res) => {
+  const markdown = auditStorage.exportSessionToMarkdown(req.params.sessionId);
+  res.type('text/markdown').send(markdown);
+});
+
+// Save AI analysis for session
+app.post('/api/audit/sessions/:sessionId/analysis', (req, res) => {
+  const success = auditStorage.saveAiAnalysis(req.params.sessionId, req.body);
+  res.json({ success });
+});
+
+// Get entries with filters
+app.get('/api/audit/entries', (req, res) => {
+  const filters = {
+    sessionId: req.query.sessionId,
+    asset: req.query.asset,
+    strategy: req.query.strategy,
+    eventTypes: req.query.eventTypes?.split(','),
+    since: req.query.since ? parseInt(req.query.since) : undefined,
+    limit: parseInt(req.query.limit) || 500,
+  };
+  const entries = auditStorage.getEntries(filters);
+  res.json({ entries, count: entries.length });
+});
+
+// Get audit stats
+app.get('/api/audit/stats', (req, res) => {
+  const stats = auditStorage.getStats();
+  res.json(stats);
+});
+
+// Cleanup old data
+app.post('/api/audit/cleanup', (req, res) => {
+  const days = parseInt(req.body.days) || 7;
+  auditStorage.cleanup(days);
+  res.json({ success: true, daysKept: days });
+});
+
+// ============================================================================
 // START SERVER
 // ============================================================================
+
+// Initialize audit database before starting server
+auditStorage.initDatabase().then(() => {
+  console.log('[AUDIT] Database initialized');
+}).catch(err => {
+  console.error('[AUDIT] Failed to initialize database:', err);
+});
 
 app.listen(PORT, () => {
   console.log(`

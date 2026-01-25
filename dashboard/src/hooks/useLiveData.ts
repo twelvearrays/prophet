@@ -95,9 +95,23 @@ export function getStrategyMode(): StrategyMode {
   return strategyMode
 }
 
+// Global price history ref - declared here so createSessionForStrategy can access it
+// This is set by the hook and used to initialize sessions with existing history
+let globalPriceHistoryRef: Map<string, PriceTick[]> | null = null
+
 // Create a session for a specific strategy
 function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType): TradingSession {
   const suffix = strategy === 'DUAL_ENTRY' ? '-dual' : '-mom'
+  // Use existing price history if available (important for session recreation)
+  const existingHistory = globalPriceHistoryRef?.get(market.conditionId) || []
+  const lastTick = existingHistory.length > 0 ? existingHistory[existingHistory.length - 1] : null
+
+  if (existingHistory.length > 0) {
+    console.log(`[SESSION] Creating ${strategy} session for ${market.asset} with ${existingHistory.length} historical ticks`)
+  } else {
+    console.log(`[SESSION] Creating ${strategy} session for ${market.asset} with NO history (will load later)`)
+  }
+
   return {
     id: market.conditionId + suffix,
     marketId: market.conditionId,
@@ -108,8 +122,8 @@ function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType):
     endTime: new Date(market.endTime).getTime(),
     primaryPosition: null,
     hedgedPairs: [],
-    priceHistory: [],
-    currentTick: null,
+    priceHistory: existingHistory,
+    currentTick: lastTick,
     entryPrice: null,
     currentPnl: 0,
     realizedPnl: 0,
@@ -154,6 +168,9 @@ function applySlippage(price: number, action: 'BUY' | 'SELL', slippageBps: numbe
   }
 }
 
+// Track if we've already initialized (survives React Strict Mode double-mount)
+let globalInitialized = false
+
 export function useLiveData() {
   const [sessions, setSessions] = useState<TradingSession[]>([])
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null)
@@ -174,6 +191,11 @@ export function useLiveData() {
   const pricesRef = useRef<Map<string, { yesPrice: number; noPrice: number; timestamp: number }>>(new Map())
   // Global price history per market (shared across strategies)
   const priceHistoryRef = useRef<Map<string, PriceTick[]>>(new Map())
+  // Track if this specific hook instance has initialized
+  const initializedRef = useRef(false)
+
+  // Link to global ref so createSessionForStrategy can access existing history
+  globalPriceHistoryRef = priceHistoryRef.current
 
   // Check if a pending order should be created based on strategy
   const checkForNewOrder = useCallback(
@@ -999,11 +1021,22 @@ export function useLiveData() {
     let mounted = true
     let refreshInterval: ReturnType<typeof setInterval> | null = null
 
+    // Prevent double-initialization from React Strict Mode
+    if (globalInitialized && !initializedRef.current) {
+      console.log("[LIVE] Skipping duplicate initialization (Strict Mode)")
+      initializedRef.current = true
+      return () => {
+        mounted = false
+      }
+    }
+
     const loadMarkets = async (isRefresh = false) => {
       if (isRefresh) {
         console.log("[LIVE] Refreshing markets...")
       } else {
         console.log("[LIVE] Initializing...")
+        globalInitialized = true
+        initializedRef.current = true
       }
 
       const markets = await fetchMarkets()
@@ -1183,9 +1216,24 @@ export function useLiveData() {
         marketsRef.current.clear()
         markets.forEach(m => marketsRef.current.set(m.conditionId, m))
 
-        const newSessions = markets.flatMap(createSessionsFromMarket)
-        setSessions(newSessions)
-        setSelectedSessionId(newSessions[0]?.id || null)
+        // Check if we already have sessions (from previous mount in Strict Mode)
+        // Don't overwrite them if they have data
+        setSessions(prev => {
+          if (prev.length > 0) {
+            console.log(`[LIVE] Keeping ${prev.length} existing sessions (Strict Mode recovery)`)
+            return prev
+          }
+          const newSessions = markets.flatMap(createSessionsFromMarket)
+          console.log(`[LIVE] Creating ${newSessions.length} new sessions`)
+          return newSessions
+        })
+
+        // Only set initial selection if we don't have one
+        setSelectedSessionId(prev => {
+          if (prev) return prev
+          const firstMarket = markets[0]
+          return firstMarket ? firstMarket.conditionId + '-mom' : null
+        })
 
         const tokenIds: string[] = []
         for (const m of markets) {
@@ -1299,6 +1347,9 @@ export function useLiveData() {
       if (wsRef.current) {
         wsRef.current.close()
       }
+      // Reset global state on unmount (for hot reload scenarios)
+      // But NOT in Strict Mode where we want to preserve state
+      // globalInitialized = false  // Commented out - let it persist
     }
     // Note: selectedSessionId intentionally excluded to prevent re-init on selection change
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1347,12 +1398,31 @@ export function useLiveData() {
   // Poll market prices every 1 second to ensure continuous chart data (like simulation)
   useEffect(() => {
     let mounted = true
+    let pollIntervalId: ReturnType<typeof setInterval> | null = null
 
     const pollMarketPrices = async () => {
       if (!mounted || marketsRef.current.size === 0) return
 
       for (const [conditionId, market] of marketsRef.current.entries()) {
         try {
+          // If we don't have history for this market yet, try to fetch it from backend
+          let existingHistory = priceHistoryRef.current.get(conditionId) || []
+          if (existingHistory.length === 0) {
+            try {
+              const historyRes = await fetch(`${API_URL}/price-history/${conditionId}`)
+              if (historyRes.ok) {
+                const historyData = await historyRes.json()
+                if (historyData.ticks && historyData.ticks.length > 0) {
+                  existingHistory = historyData.ticks
+                  priceHistoryRef.current.set(conditionId, existingHistory)
+                  console.log(`[POLL] Loaded ${existingHistory.length} historical ticks for ${market.asset}`)
+                }
+              }
+            } catch {
+              // Ignore history fetch errors
+            }
+          }
+
           // Pass marketId to backend for price history storage
           const priceRes = await fetch(`${API_URL}/price/${market.yesTokenId}/${market.noTokenId}?marketId=${conditionId}`)
           if (!priceRes.ok || !mounted) continue
@@ -1375,7 +1445,8 @@ export function useLiveData() {
             noLiquidity: priceData.noLiquidity || 100,
           }
 
-          const existingHistory = priceHistoryRef.current.get(conditionId) || []
+          // Re-fetch existing history in case it was loaded above
+          existingHistory = priceHistoryRef.current.get(conditionId) || []
           const newHistory = [...existingHistory.slice(-500), tick]
           priceHistoryRef.current.set(conditionId, newHistory)
 
@@ -1390,12 +1461,18 @@ export function useLiveData() {
       }
     }
 
-    // Poll every 1 second for smooth chart updates
-    const interval = setInterval(pollMarketPrices, 1000)
+    // Delay start to allow initial history fetch to complete
+    const startDelay = setTimeout(() => {
+      if (!mounted) return
+      // Poll every 1 second for smooth chart updates
+      pollMarketPrices() // Run immediately
+      pollIntervalId = setInterval(pollMarketPrices, 1000)
+    }, 1500) // Wait 1.5s for initial load to complete
 
     return () => {
       mounted = false
-      clearInterval(interval)
+      clearTimeout(startDelay)
+      if (pollIntervalId) clearInterval(pollIntervalId)
     }
   }, [processSessionTick])
 

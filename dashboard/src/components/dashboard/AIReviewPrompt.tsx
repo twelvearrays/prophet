@@ -5,8 +5,8 @@
  * for analyzing trading session performance and finding improvements.
  */
 
-import { useState, useMemo } from 'react'
-import { auditLog } from '@/lib/auditLog'
+import { useState, useEffect } from 'react'
+import { auditLog, type SessionAudit } from '@/lib/auditLog'
 
 interface AIReviewPromptProps {
   sessionId?: string
@@ -15,16 +15,34 @@ interface AIReviewPromptProps {
 export function AIReviewPrompt({ sessionId }: AIReviewPromptProps) {
   const [copied, setCopied] = useState(false)
   const [selectedSession, setSelectedSession] = useState<string>(sessionId || '')
+  const [sessions, setSessions] = useState<SessionAudit[]>([])
+  const [selectedSessionData, setSelectedSessionData] = useState<SessionAudit | null>(null)
+  const [loading, setLoading] = useState(true)
 
-  const sessions = useMemo(() => auditLog.getSessions(), [])
+  // Load sessions on mount
+  useEffect(() => {
+    auditLog.getSessions().then(data => {
+      setSessions(data)
+      setLoading(false)
+    })
+  }, [])
 
-  const generatePrompt = (id: string): string => {
-    const session = auditLog.getSession(id)
-    if (!session) return ''
+  // Load selected session data
+  useEffect(() => {
+    if (selectedSession) {
+      auditLog.getSession(selectedSession).then(data => {
+        setSelectedSessionData(data || null)
+      })
+    } else {
+      setSelectedSessionData(null)
+    }
+  }, [selectedSession])
 
-    const markdown = auditLog.exportSessionToMarkdown(id)
+  const handleCopy = async () => {
+    if (!selectedSession) return
 
-    return `# Trading Session Review Request
+    const markdown = await auditLog.exportSessionToMarkdown(selectedSession)
+    const prompt = `# Trading Session Review Request
 
 You are an expert algorithmic trading analyst. Please review this Polymarket 15-minute crypto trading session and provide:
 
@@ -66,18 +84,17 @@ ${markdown}
 ---
 
 Please analyze this session thoroughly. Be specific about timestamps and price levels when identifying issues. Focus on actionable improvements.`
-  }
 
-  const handleCopy = () => {
-    const prompt = generatePrompt(selectedSession)
     navigator.clipboard.writeText(prompt)
     setCopied(true)
     setTimeout(() => setCopied(false), 2000)
   }
 
-  const handleDownload = () => {
-    const prompt = generatePrompt(selectedSession)
-    const blob = new Blob([prompt], { type: 'text/markdown' })
+  const handleDownload = async () => {
+    if (!selectedSession) return
+
+    const markdown = await auditLog.exportSessionToMarkdown(selectedSession)
+    const blob = new Blob([markdown], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -85,8 +102,6 @@ Please analyze this session thoroughly. Be specific about timestamps and price l
     a.click()
     URL.revokeObjectURL(url)
   }
-
-  const selectedSessionData = selectedSession ? auditLog.getSession(selectedSession) : null
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50">
@@ -108,8 +123,9 @@ Please analyze this session thoroughly. Be specific about timestamps and price l
           value={selectedSession}
           onChange={e => setSelectedSession(e.target.value)}
           className="w-full px-3 py-2 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-200 text-sm"
+          disabled={loading}
         >
-          <option value="">Choose a session...</option>
+          <option value="">{loading ? 'Loading sessions...' : 'Choose a session...'}</option>
           {sessions.map(s => (
             <option key={s.sessionId} value={s.sessionId}>
               {s.asset} ({s.strategy === 'MOMENTUM' ? 'MOM' : 'DUAL'}) - {new Date(s.startTime).toLocaleString()} - {s.summary.finalPnl >= 0 ? '+' : ''}${s.summary.finalPnl.toFixed(2)}

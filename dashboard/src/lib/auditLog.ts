@@ -3,7 +3,11 @@
  *
  * Comprehensive logging of every trading decision for review and analysis.
  * Each log entry captures the full context: prices, thresholds, position state, reasoning.
+ *
+ * Data is stored in SQLite on the backend, not localStorage.
  */
+
+const API_URL = 'http://localhost:3001/api'
 
 export type AuditEventType =
   | 'SESSION_START'
@@ -140,70 +144,10 @@ export interface SessionAudit {
   }
 }
 
-// In-memory storage (persisted to localStorage)
-const STORAGE_KEY = 'polymarket-audit-log'
-const MAX_ENTRIES = 5000 // Keep last 5000 entries
-const MAX_SESSIONS = 100 // Keep last 100 sessions
-
 class AuditLogManager {
-  private entries: AuditLogEntry[] = []
-  private sessions: Map<string, SessionAudit> = new Map()
   private listeners: Set<(entry: AuditLogEntry) => void> = new Set()
-
-  constructor() {
-    this.loadFromStorage()
-  }
-
-  private loadFromStorage() {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY)
-      if (stored) {
-        const data = JSON.parse(stored)
-        this.entries = data.entries || []
-        this.sessions = new Map(Object.entries(data.sessions || {}))
-      }
-    } catch (e) {
-      console.error('[AUDIT] Failed to load from storage:', e)
-    }
-  }
-
-  private saveToStorage() {
-    try {
-      // Trim to max size
-      if (this.entries.length > MAX_ENTRIES) {
-        this.entries = this.entries.slice(-MAX_ENTRIES)
-      }
-
-      // Trim sessions
-      if (this.sessions.size > MAX_SESSIONS) {
-        const sortedSessions = [...this.sessions.entries()]
-          .sort((a, b) => b[1].startTime - a[1].startTime)
-          .slice(0, MAX_SESSIONS)
-        this.sessions = new Map(sortedSessions)
-      }
-
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({
-        entries: this.entries,
-        sessions: Object.fromEntries(this.sessions),
-      }))
-    } catch (e) {
-      console.error('[AUDIT] Failed to save to storage:', e)
-    }
-  }
-
-  // Generate unique ID
-  private generateId(): string {
-    return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
-  }
-
-  // Format time remaining
-  private formatTimeRemaining(ms: number): string {
-    if (ms <= 0) return '0:00'
-    const totalSec = Math.floor(ms / 1000)
-    const min = Math.floor(totalSec / 60)
-    const sec = totalSec % 60
-    return `${min}:${sec.toString().padStart(2, '0')}`
-  }
+  private pendingLogs: Array<Record<string, unknown>> = []
+  private flushTimeout: ReturnType<typeof setTimeout> | null = null
 
   // Deduplication: track recent events to prevent double-logging from REST + WebSocket
   private recentEvents: Map<string, number> = new Map()
@@ -229,6 +173,52 @@ class AuditLogManager {
     }
 
     return false
+  }
+
+  // Generate unique ID
+  private generateId(): string {
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 9)}`
+  }
+
+  // Format time remaining
+  private formatTimeRemaining(ms: number): string {
+    if (ms <= 0) return '0:00'
+    const totalSec = Math.floor(ms / 1000)
+    const min = Math.floor(totalSec / 60)
+    const sec = totalSec % 60
+    return `${min}:${sec.toString().padStart(2, '0')}`
+  }
+
+  // Flush pending logs to backend
+  private async flushLogs() {
+    if (this.pendingLogs.length === 0) return
+
+    const logsToSend = [...this.pendingLogs]
+    this.pendingLogs = []
+
+    // Send each log to backend (could batch these in future)
+    for (const log of logsToSend) {
+      try {
+        await fetch(`${API_URL}/audit/log`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(log),
+        })
+      } catch (e) {
+        // Silently fail - audit logs are not critical
+        console.debug('[AUDIT] Failed to send log to backend:', e)
+      }
+    }
+  }
+
+  // Schedule flush (debounced)
+  private scheduleFlush() {
+    if (this.flushTimeout) return
+
+    this.flushTimeout = setTimeout(() => {
+      this.flushTimeout = null
+      this.flushLogs()
+    }, 1000) // Flush every 1 second
   }
 
   // Log an event
@@ -278,60 +268,28 @@ class AuditLogManager {
       rawData: params.rawData,
     }
 
-    this.entries.push(entry)
+    // Queue for backend (don't send rawData to save bandwidth)
+    this.pendingLogs.push({
+      timestamp: now,
+      sessionId: params.sessionId,
+      asset: params.asset,
+      strategy: params.strategy,
+      eventType: params.eventType,
+      severity: params.severity || 'info',
+      yesPrice: params.yesPrice,
+      noPrice: params.noPrice,
+      yesLiquidity: params.yesLiquidity,
+      noLiquidity: params.noLiquidity,
+      timeRemainingMs,
+      endTime: params.endTime,
+      position: params.position,
+      decision: params.decision,
+      outcome: params.outcome,
+    })
+    this.scheduleFlush()
 
-    // Update session
-    let session = this.sessions.get(params.sessionId)
-    if (!session) {
-      session = {
-        sessionId: params.sessionId,
-        asset: params.asset,
-        strategy: params.strategy,
-        marketId: params.sessionId.replace(/-mom$|-dual$/, ''),
-        startTime: now,
-        endTime: params.endTime,
-        summary: {
-          totalEntries: 0,
-          totalExits: 0,
-          hedgeCount: 0,
-          finalPnl: 0,
-          peakPnl: 0,
-          troughPnl: 0,
-          winningTrades: 0,
-          losingTrades: 0,
-        },
-        entries: [],
-      }
-      this.sessions.set(params.sessionId, session)
-    }
-    session.entries.push(entry)
-
-    // Update summary based on event type
-    if (params.eventType === 'ENTRY_FILL' || params.eventType === 'MAKER_ORDER_FILLED') {
-      session.summary.totalEntries++
-    }
-    if (params.eventType === 'HEDGE_FILL') {
-      session.summary.hedgeCount++
-    }
-    if (params.eventType === 'TAKE_PROFIT' || params.eventType === 'LOSER_EXIT' ||
-        params.eventType === 'WINNER_EXIT' || params.eventType === 'FORCE_EXIT') {
-      session.summary.totalExits++
-      if (params.outcome?.pnl !== undefined) {
-        session.summary.finalPnl = params.outcome.pnl
-        if (params.outcome.pnl > 0) session.summary.winningTrades++
-        else if (params.outcome.pnl < 0) session.summary.losingTrades++
-        session.summary.peakPnl = Math.max(session.summary.peakPnl, params.outcome.pnl)
-        session.summary.troughPnl = Math.min(session.summary.troughPnl, params.outcome.pnl)
-      }
-    }
-
-    // Notify listeners
+    // Notify listeners immediately (for UI updates)
     this.listeners.forEach(cb => cb(entry))
-
-    // Save periodically (every 10 entries)
-    if (this.entries.length % 10 === 0) {
-      this.saveToStorage()
-    }
 
     return entry
   }
@@ -342,123 +300,154 @@ class AuditLogManager {
     return () => this.listeners.delete(callback)
   }
 
-  // Get all entries
-  getEntries(filter?: {
-    sessionId?: string
-    asset?: string
-    strategy?: 'MOMENTUM' | 'DUAL_ENTRY'
-    eventTypes?: AuditEventType[]
-    severity?: AuditSeverity[]
-    since?: number
-  }): AuditLogEntry[] {
-    let result = this.entries
+  // Get sessions from backend
+  async getSessions(): Promise<SessionAudit[]> {
+    try {
+      const res = await fetch(`${API_URL}/audit/sessions`)
+      if (!res.ok) return []
+      const data = await res.json()
 
-    if (filter?.sessionId) {
-      result = result.filter(e => e.sessionId === filter.sessionId)
+      // Convert backend format to frontend format
+      return data.sessions.map((s: Record<string, unknown>) => ({
+        sessionId: s.session_id,
+        asset: s.asset,
+        strategy: s.strategy,
+        marketId: s.market_id,
+        startTime: s.start_time,
+        endTime: s.end_time,
+        summary: {
+          totalEntries: s.total_entries || 0,
+          totalExits: s.total_exits || 0,
+          hedgeCount: s.hedge_count || 0,
+          finalPnl: s.final_pnl || 0,
+          peakPnl: s.peak_pnl || 0,
+          troughPnl: s.trough_pnl || 0,
+          winningTrades: s.winning_trades || 0,
+          losingTrades: s.losing_trades || 0,
+        },
+        entries: [],
+        aiAnalysis: s.ai_grade ? {
+          grade: s.ai_grade,
+          summary: s.ai_summary,
+          strengths: [],
+          weaknesses: [],
+          suggestions: [],
+          analyzedAt: s.analyzed_at,
+        } : undefined,
+      }))
+    } catch (e) {
+      console.error('[AUDIT] Failed to fetch sessions:', e)
+      return []
     }
-    if (filter?.asset) {
-      result = result.filter(e => e.asset === filter.asset)
-    }
-    if (filter?.strategy) {
-      result = result.filter(e => e.strategy === filter.strategy)
-    }
-    if (filter?.eventTypes?.length) {
-      result = result.filter(e => filter.eventTypes!.includes(e.eventType))
-    }
-    if (filter?.severity?.length) {
-      result = result.filter(e => filter.severity!.includes(e.severity))
-    }
-    if (filter?.since !== undefined) {
-      const since = filter.since
-      result = result.filter(e => e.timestamp >= since)
-    }
-
-    return result
   }
 
-  // Get session audit
-  getSession(sessionId: string): SessionAudit | undefined {
-    return this.sessions.get(sessionId)
-  }
+  // Get session from backend
+  async getSession(sessionId: string): Promise<SessionAudit | undefined> {
+    try {
+      const [sessionRes, entriesRes] = await Promise.all([
+        fetch(`${API_URL}/audit/sessions/${sessionId}`),
+        fetch(`${API_URL}/audit/sessions/${sessionId}/entries`),
+      ])
 
-  // Get all sessions
-  getSessions(): SessionAudit[] {
-    return [...this.sessions.values()].sort((a, b) => b.startTime - a.startTime)
+      if (!sessionRes.ok) return undefined
+
+      const s = await sessionRes.json()
+      const entriesData = entriesRes.ok ? await entriesRes.json() : { entries: [] }
+
+      // Convert entries from backend format
+      const entries: AuditLogEntry[] = entriesData.entries.map((e: Record<string, unknown>) => ({
+        id: e.id,
+        timestamp: e.timestamp,
+        sessionId: e.session_id,
+        asset: e.asset,
+        strategy: e.strategy,
+        eventType: e.event_type,
+        severity: e.severity,
+        context: {
+          yesPrice: e.yes_price,
+          noPrice: e.no_price,
+          yesLiquidity: e.yes_liquidity,
+          noLiquidity: e.no_liquidity,
+          timeRemainingMs: e.time_remaining_ms,
+          timeRemainingFormatted: this.formatTimeRemaining(e.time_remaining_ms as number || 0),
+        },
+        position: e.position_side ? {
+          side: e.position_side,
+          shares: e.position_shares,
+          avgPrice: e.position_avg_price,
+          unrealizedPnl: e.position_unrealized_pnl,
+        } : undefined,
+        decision: {
+          action: e.decision_action,
+          reason: e.decision_reason,
+          ...(e.decision_data ? JSON.parse(e.decision_data as string) : {}),
+        },
+        outcome: e.outcome_pnl !== null ? {
+          fillPrice: e.outcome_fill_price,
+          shares: e.outcome_shares,
+          pnl: e.outcome_pnl,
+        } : undefined,
+      }))
+
+      return {
+        sessionId: s.session_id,
+        asset: s.asset,
+        strategy: s.strategy,
+        marketId: s.market_id,
+        startTime: s.start_time,
+        endTime: s.end_time,
+        summary: {
+          totalEntries: s.total_entries || 0,
+          totalExits: s.total_exits || 0,
+          hedgeCount: s.hedge_count || 0,
+          finalPnl: s.final_pnl || 0,
+          peakPnl: s.peak_pnl || 0,
+          troughPnl: s.trough_pnl || 0,
+          winningTrades: s.winning_trades || 0,
+          losingTrades: s.losing_trades || 0,
+        },
+        entries,
+        aiAnalysis: s.ai_grade ? {
+          grade: s.ai_grade,
+          summary: s.ai_summary,
+          strengths: [],
+          weaknesses: [],
+          suggestions: [],
+          analyzedAt: s.analyzed_at,
+        } : undefined,
+      }
+    } catch (e) {
+      console.error('[AUDIT] Failed to fetch session:', e)
+      return undefined
+    }
   }
 
   // Export session to markdown (for AI review)
-  exportSessionToMarkdown(sessionId: string): string {
-    const session = this.sessions.get(sessionId)
-    if (!session) return 'Session not found'
-
-    const lines: string[] = [
-      `# Trade Audit: ${session.asset} (${session.strategy})`,
-      '',
-      `**Session ID:** ${session.sessionId}`,
-      `**Start:** ${new Date(session.startTime).toLocaleString()}`,
-      `**End:** ${new Date(session.endTime).toLocaleString()}`,
-      '',
-      '## Summary',
-      `- Total Entries: ${session.summary.totalEntries}`,
-      `- Total Exits: ${session.summary.totalExits}`,
-      `- Hedges: ${session.summary.hedgeCount}`,
-      `- Final P&L: $${session.summary.finalPnl.toFixed(2)}`,
-      `- Peak P&L: $${session.summary.peakPnl.toFixed(2)}`,
-      `- Trough P&L: $${session.summary.troughPnl.toFixed(2)}`,
-      `- Winning Trades: ${session.summary.winningTrades}`,
-      `- Losing Trades: ${session.summary.losingTrades}`,
-      '',
-      '## Event Log',
-      '',
-    ]
-
-    for (const entry of session.entries) {
-      const time = new Date(entry.timestamp).toLocaleTimeString()
-      const remaining = entry.context.timeRemainingFormatted
-
-      lines.push(`### ${time} [${remaining} left] - ${entry.eventType}`)
-      lines.push('')
-      lines.push(`**Severity:** ${entry.severity}`)
-      lines.push(`**Prices:** YES=${(entry.context.yesPrice * 100).toFixed(1)}¢, NO=${(entry.context.noPrice * 100).toFixed(1)}¢`)
-
-      if (entry.position) {
-        lines.push(`**Position:** ${entry.position.side || 'None'} ${entry.position.shares?.toFixed(1) || 0} shares @ ${((entry.position.avgPrice || 0) * 100).toFixed(1)}¢`)
-      }
-
-      lines.push(`**Action:** ${entry.decision.action}`)
-      lines.push(`**Reason:** ${entry.decision.reason}`)
-
-      if (entry.decision.thresholds) {
-        lines.push(`**Thresholds:** ${JSON.stringify(entry.decision.thresholds)}`)
-      }
-
-      if (entry.outcome) {
-        lines.push(`**Outcome:** Fill @ ${((entry.outcome.fillPrice || 0) * 100).toFixed(1)}¢, P&L: $${(entry.outcome.pnl || 0).toFixed(2)}`)
-      }
-
-      lines.push('')
+  async exportSessionToMarkdown(sessionId: string): Promise<string> {
+    try {
+      const res = await fetch(`${API_URL}/audit/sessions/${sessionId}/markdown`)
+      if (!res.ok) return 'Session not found'
+      return await res.text()
+    } catch (e) {
+      console.error('[AUDIT] Failed to export session:', e)
+      return 'Error exporting session'
     }
-
-    return lines.join('\n')
   }
 
   // Export session to JSON
-  exportSessionToJSON(sessionId: string): string {
-    const session = this.sessions.get(sessionId)
+  async exportSessionToJSON(sessionId: string): Promise<string> {
+    const session = await this.getSession(sessionId)
     if (!session) return '{}'
     return JSON.stringify(session, null, 2)
   }
 
-  // Clear all logs
-  clear() {
-    this.entries = []
-    this.sessions.clear()
-    localStorage.removeItem(STORAGE_KEY)
-  }
-
-  // Force save
-  save() {
-    this.saveToStorage()
+  // Force flush any pending logs
+  flush() {
+    if (this.flushTimeout) {
+      clearTimeout(this.flushTimeout)
+      this.flushTimeout = null
+    }
+    this.flushLogs()
   }
 }
 

@@ -71,11 +71,8 @@ export function AuditLog({ sessionId, maxHeight = '400px' }: AuditLogProps) {
   const [showFilters, setShowFilters] = useState(false)
   const [autoScroll, setAutoScroll] = useState(true)
 
-  // Subscribe to new entries
+  // Subscribe to new entries (real-time from frontend logging)
   useEffect(() => {
-    // Load existing entries
-    setEntries(auditLog.getEntries({ sessionId }))
-
     // Subscribe to new entries
     const unsubscribe = auditLog.subscribe((entry) => {
       if (sessionId && entry.sessionId !== sessionId) return
@@ -97,13 +94,13 @@ export function AuditLog({ sessionId, maxHeight = '400px' }: AuditLogProps) {
   }, [entries, filter])
 
   // Export current session
-  const handleExport = useCallback((format: 'json' | 'markdown') => {
+  const handleExport = useCallback(async (format: 'json' | 'markdown') => {
     const id = sessionId || filteredEntries[0]?.sessionId
     if (!id) return
 
     const content = format === 'json'
-      ? auditLog.exportSessionToJSON(id)
-      : auditLog.exportSessionToMarkdown(id)
+      ? await auditLog.exportSessionToJSON(id)
+      : await auditLog.exportSessionToMarkdown(id)
 
     const blob = new Blob([content], { type: format === 'json' ? 'application/json' : 'text/markdown' })
     const url = URL.createObjectURL(blob)
@@ -114,12 +111,9 @@ export function AuditLog({ sessionId, maxHeight = '400px' }: AuditLogProps) {
     URL.revokeObjectURL(url)
   }, [sessionId, filteredEntries])
 
-  // Clear logs
+  // Clear current entries (frontend only - backend stores persist)
   const handleClear = () => {
-    if (confirm('Clear all audit logs? This cannot be undone.')) {
-      auditLog.clear()
-      setEntries([])
-    }
+    setEntries([])
   }
 
   // Unique assets for filter
@@ -165,6 +159,7 @@ export function AuditLog({ sessionId, maxHeight = '400px' }: AuditLogProps) {
           <button
             onClick={handleClear}
             className="px-2 py-1 text-xs rounded bg-zinc-700 text-rose-400 hover:bg-zinc-600"
+            title="Clear current view (doesn't delete from database)"
           >
             🗑️
           </button>
