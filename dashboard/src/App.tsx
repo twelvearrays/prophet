@@ -8,7 +8,7 @@ import { AuditLog } from "@/components/dashboard/AuditLog"
 import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
 import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
-import { useLiveData, setPositionSize, setSelectedAssets } from "@/hooks/useLiveData"
+import { useLiveData, setPositionSize, setSelectedAssets, setMomentumWarmup } from "@/hooks/useLiveData"
 import { setDualEntryPositionSize } from "@/strategies/dualEntry"
 
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
@@ -20,6 +20,7 @@ function App() {
   const [isLiveTrading, setIsLiveTrading] = useState(false)
   const [positionSize, setPositionSizeState] = useState(1) // Default $1
   const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
+  const [warmupSeconds, setWarmupSecondsState] = useState(60) // Default 60 seconds warmup
 
   // Update both momentum and dual-entry configs when position size changes
   const handlePositionSizeChange = useCallback((size: number) => {
@@ -32,6 +33,12 @@ function App() {
   const handleAssetsChange = useCallback((assets: Asset[]) => {
     setSelectedAssetsState(assets)
     setSelectedAssets(assets)
+  }, [])
+
+  // Update momentum warmup
+  const handleWarmupChange = useCallback((seconds: number) => {
+    setWarmupSecondsState(seconds)
+    setMomentumWarmup(seconds)
   }, [])
 
   const simulation = useSimulation()
@@ -193,6 +200,8 @@ function App() {
                 onPositionSizeChange={handlePositionSizeChange}
                 selectedAssets={selectedAssetsState}
                 onAssetsChange={handleAssetsChange}
+                warmupSeconds={warmupSeconds}
+                onWarmupChange={handleWarmupChange}
               />
             </div>
           </div>

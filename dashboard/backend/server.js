@@ -25,50 +25,50 @@ const rawClobClient = new ClobClient(
   137 // Polygon chain ID
 );
 
+// Store original console.error ONCE at module load to prevent recursion
+const _originalConsoleError = console.error.bind(console);
+
 // Wrapper to suppress verbose CLOB client error logs for expected 404s
 // The library logs full request configs which spam the console
 const clobClient = {
   async getOrderBook(tokenId) {
-    const originalError = console.error;
     console.error = (...args) => {
       // Suppress CLOB Client request error logs (they're verbose and expected for new markets)
       if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
         return;
       }
-      originalError.apply(console, args);
+      _originalConsoleError(...args);
     };
     try {
       return await rawClobClient.getOrderBook(tokenId);
     } finally {
-      console.error = originalError;
+      console.error = _originalConsoleError;
     }
   },
   async getMidpoint(tokenId) {
-    const originalError = console.error;
     console.error = (...args) => {
       if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
         return;
       }
-      originalError.apply(console, args);
+      _originalConsoleError(...args);
     };
     try {
       return await rawClobClient.getMidpoint(tokenId);
     } finally {
-      console.error = originalError;
+      console.error = _originalConsoleError;
     }
   },
   async getSpread(tokenId) {
-    const originalError = console.error;
     console.error = (...args) => {
       if (args[0]?.includes?.('[CLOB Client]') || (typeof args[0] === 'string' && args[0].includes('[CLOB Client]'))) {
         return;
       }
-      originalError.apply(console, args);
+      _originalConsoleError(...args);
     };
     try {
       return await rawClobClient.getSpread(tokenId);
     } finally {
-      console.error = originalError;
+      console.error = _originalConsoleError;
     }
   },
   async getMarket(conditionId) {

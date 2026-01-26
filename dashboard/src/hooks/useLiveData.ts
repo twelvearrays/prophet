@@ -29,6 +29,20 @@ export function getPositionSize(): number {
   return positionSizeConfig
 }
 
+// Momentum warmup configuration - wait before first trade
+let momentumWarmupSeconds = 60 // Default 60 seconds warmup
+
+export function setMomentumWarmup(seconds: number) {
+  if (seconds >= 0 && seconds <= 720) { // 0-12 minutes
+    momentumWarmupSeconds = seconds
+    console.log(`[CONFIG] Momentum warmup updated: ${seconds}s`)
+  }
+}
+
+export function getMomentumWarmup(): number {
+  return momentumWarmupSeconds
+}
+
 const CONFIG = {
   get positionSize() { return positionSizeConfig }, // Dynamic getter
   entryThreshold: 0.65,
@@ -253,6 +267,22 @@ export function useLiveData() {
       }
 
       if (session.state === "WAITING") {
+        // WARMUP CHECK - Don't enter until warmup period has passed
+        // This only applies to FIRST entry (no hedges and no previous entries)
+        const hasEnteredBefore = session.hedgedPairs.length > 0 || session.actions.some(a => a.type === 'ENTER')
+        if (!hasEnteredBefore) {
+          const sessionStartTime = session.endTime - (15 * 60 * 1000) // Session starts 15 min before end
+          const elapsedSeconds = (now - sessionStartTime) / 1000
+          if (elapsedSeconds < momentumWarmupSeconds) {
+            // Log warmup status every 10 ticks
+            if (session.priceHistory.length % 10 === 0) {
+              const remaining = Math.ceil(momentumWarmupSeconds - elapsedSeconds)
+              console.log(`[WARMUP] ${session.asset} | Waiting ${remaining}s before first trade (warmup: ${momentumWarmupSeconds}s)`)
+            }
+            return null
+          }
+        }
+
         // After max hedges, we CAN still re-enter and scale - we just can't hedge anymore
         // Log that we're at max hedges but still looking
         if (session.hedgedPairs.length >= CONFIG.maxHedges && session.priceHistory.length % 60 === 0) {
