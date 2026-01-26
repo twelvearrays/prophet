@@ -11,6 +11,7 @@ import { ClobClient } from '@polymarket/clob-client';
 import * as trading from './trading.js';
 import * as priceHistory from './priceHistory.js';
 import * as auditStorage from './auditStorage.js';
+import * as configPresets from './configPresets.js';
 
 const app = express();
 const PORT = 3001;
@@ -1419,14 +1420,124 @@ app.post('/api/audit/cleanup', (req, res) => {
 });
 
 // ============================================================================
+// CONFIG PRESETS API
+// ============================================================================
+
+// Get all presets
+app.get('/api/presets', (req, res) => {
+  try {
+    const presets = configPresets.getAllPresets();
+    res.json(presets);
+  } catch (error) {
+    console.error('[PRESETS] Error getting presets:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get default preset
+app.get('/api/presets/default', (req, res) => {
+  try {
+    const preset = configPresets.getDefaultPreset();
+    if (preset) {
+      res.json(preset);
+    } else {
+      res.status(404).json({ error: 'No default preset set' });
+    }
+  } catch (error) {
+    console.error('[PRESETS] Error getting default preset:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get preset by name
+app.get('/api/presets/:name', (req, res) => {
+  try {
+    const preset = configPresets.getPresetByName(req.params.name);
+    if (preset) {
+      res.json(preset);
+    } else {
+      res.status(404).json({ error: 'Preset not found' });
+    }
+  } catch (error) {
+    console.error('[PRESETS] Error getting preset:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Save or update preset
+app.post('/api/presets', (req, res) => {
+  try {
+    const { name, positionSize, warmupSeconds, selectedAssets, isDefault } = req.body;
+    if (!name) {
+      return res.status(400).json({ error: 'Name is required' });
+    }
+    const preset = configPresets.savePreset({
+      name,
+      positionSize: positionSize ?? 1,
+      warmupSeconds: warmupSeconds ?? 60,
+      selectedAssets: selectedAssets ?? ['BTC'],
+      isDefault: isDefault ?? false,
+    });
+    console.log('[PRESETS] Saved preset:', name);
+    res.json(preset);
+  } catch (error) {
+    console.error('[PRESETS] Error saving preset:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Set preset as default
+app.put('/api/presets/:name/default', (req, res) => {
+  try {
+    const preset = configPresets.setPresetAsDefault(req.params.name);
+    if (preset) {
+      console.log('[PRESETS] Set default:', req.params.name);
+      res.json(preset);
+    } else {
+      res.status(404).json({ error: 'Preset not found' });
+    }
+  } catch (error) {
+    console.error('[PRESETS] Error setting default:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Clear default
+app.delete('/api/presets/default', (req, res) => {
+  try {
+    configPresets.clearDefault();
+    console.log('[PRESETS] Cleared default');
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[PRESETS] Error clearing default:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Delete preset
+app.delete('/api/presets/:name', (req, res) => {
+  try {
+    configPresets.deletePreset(req.params.name);
+    console.log('[PRESETS] Deleted preset:', req.params.name);
+    res.json({ success: true });
+  } catch (error) {
+    console.error('[PRESETS] Error deleting preset:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ============================================================================
 // START SERVER
 // ============================================================================
 
-// Initialize audit database before starting server
-auditStorage.initDatabase().then(() => {
-  console.log('[AUDIT] Database initialized');
+// Initialize databases before starting server
+Promise.all([
+  auditStorage.initDatabase(),
+  configPresets.initPresetsDatabase(),
+]).then(() => {
+  console.log('[DB] All databases initialized');
 }).catch(err => {
-  console.error('[AUDIT] Failed to initialize database:', err);
+  console.error('[DB] Failed to initialize databases:', err);
 });
 
 app.listen(PORT, () => {

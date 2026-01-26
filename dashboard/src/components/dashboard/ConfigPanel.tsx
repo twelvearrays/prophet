@@ -4,9 +4,20 @@
  * UI for adjusting strategy parameters, restart controls, and system settings
  */
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useConfig } from '@/config/useConfig'
 import { CONFIG_LABELS } from '@/config/strategyConfig'
+import {
+  getSavedConfigs,
+  saveConfig,
+  deleteConfig,
+  loadConfig,
+  setDefaultConfig,
+  clearDefaultConfig,
+  type SavedConfig,
+} from '@/lib/configStorage'
+
+type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
 interface ConfigSliderProps {
   configKey: string
@@ -81,13 +92,15 @@ function ConfigToggle({ configKey, value, onChange, disabled }: ConfigToggleProp
   )
 }
 
-type TabType = 'momentum' | 'dualEntry' | 'system'
+type TabType = 'momentum' | 'dualEntry' | 'system' | 'presets'
 
 interface ConfigPanelProps {
   positionSize?: number
   onPositionSizeChange?: (size: number) => void
   warmupSeconds?: number
   onWarmupChange?: (seconds: number) => void
+  selectedAssets?: Asset[]
+  onAssetsChange?: (assets: Asset[]) => void
 }
 
 export function ConfigPanel({
@@ -95,6 +108,8 @@ export function ConfigPanel({
   onPositionSizeChange,
   warmupSeconds = 60,
   onWarmupChange,
+  selectedAssets = ['BTC'] as Asset[],
+  onAssetsChange,
 }: ConfigPanelProps) {
   const {
     config,
@@ -112,11 +127,76 @@ export function ConfigPanel({
   const [activeTab, setActiveTab] = useState<TabType>('momentum')
   const [isRestarting, setIsRestarting] = useState(false)
 
+  // Config save/load state
+  const [savedConfigs, setSavedConfigs] = useState<SavedConfig[]>([])
+  const [newConfigName, setNewConfigName] = useState('')
+  const [selectedConfigName, setSelectedConfigName] = useState<string | null>(null)
+
+  // Load saved configs on mount
+  useEffect(() => {
+    const loadPresets = async () => {
+      const presets = await getSavedConfigs()
+      setSavedConfigs(presets)
+    }
+    loadPresets()
+  }, [])
+
+  // Refresh presets list
+  const refreshPresets = async () => {
+    const presets = await getSavedConfigs()
+    setSavedConfigs(presets)
+  }
+
   const handleRestart = async () => {
     setIsRestarting(true)
     await syncToBackend()
     await restartSessions()
     setIsRestarting(false)
+  }
+
+  const handleSaveConfig = async () => {
+    if (!newConfigName.trim()) return
+
+    const config = await saveConfig({
+      name: newConfigName.trim(),
+      positionSize,
+      warmupSeconds,
+      selectedAssets,
+    })
+
+    await refreshPresets()
+    setNewConfigName('')
+    if (config) {
+      setSelectedConfigName(config.name)
+    }
+  }
+
+  const handleLoadConfig = async (name: string) => {
+    const config = await loadConfig(name)
+    if (config) {
+      onPositionSizeChange?.(config.positionSize)
+      onWarmupChange?.(config.warmupSeconds)
+      onAssetsChange?.(config.selectedAssets as Asset[])
+      setSelectedConfigName(name)
+    }
+  }
+
+  const handleDeleteConfig = async (name: string) => {
+    await deleteConfig(name)
+    await refreshPresets()
+    if (selectedConfigName === name) {
+      setSelectedConfigName(null)
+    }
+  }
+
+  const handleSetDefault = async (name: string) => {
+    const preset = savedConfigs.find(c => c.name === name)
+    if (preset?.isDefault) {
+      await clearDefaultConfig()
+    } else {
+      await setDefaultConfig(name)
+    }
+    await refreshPresets()
   }
 
   if (isLoading) {
@@ -163,6 +243,7 @@ export function ConfigPanel({
             { key: 'momentum', label: '🚀 Momentum' },
             { key: 'dualEntry', label: '⚖️ Dual-Entry' },
             { key: 'system', label: '⚙️ System' },
+            { key: 'presets', label: '💾 Presets' },
           ].map(tab => (
             <button
               key={tab.key}
@@ -432,6 +513,121 @@ export function ConfigPanel({
                   {isSaving ? 'Syncing...' : '⬆ Sync Config to Backend'}
                 </button>
               </div>
+            </div>
+          </>
+        )}
+
+        {activeTab === 'presets' && (
+          <>
+            {/* Save Current Config */}
+            <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Save Current Settings</div>
+            <div className="flex gap-2 mb-4">
+              <input
+                type="text"
+                value={newConfigName}
+                onChange={(e) => setNewConfigName(e.target.value)}
+                placeholder="Enter preset name..."
+                className="flex-1 px-3 py-2 text-sm bg-zinc-800 border border-zinc-700 rounded text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-cyan-500"
+              />
+              <button
+                onClick={handleSaveConfig}
+                disabled={!newConfigName.trim()}
+                className="px-4 py-2 text-sm rounded bg-cyan-600 hover:bg-cyan-500 text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Save
+              </button>
+            </div>
+
+            {/* Current Config Summary */}
+            <div className="p-3 bg-zinc-800/50 rounded border border-zinc-700/50 mb-4">
+              <p className="text-xs text-zinc-500 mb-2">Current Settings:</p>
+              <div className="grid grid-cols-3 gap-2 text-xs font-mono">
+                <div>
+                  <span className="text-zinc-500">Size:</span>
+                  <span className="text-cyan-400 ml-1">${positionSize}</span>
+                </div>
+                <div>
+                  <span className="text-zinc-500">Warmup:</span>
+                  <span className="text-cyan-400 ml-1">{warmupSeconds}s</span>
+                </div>
+                <div>
+                  <span className="text-zinc-500">Assets:</span>
+                  <span className="text-cyan-400 ml-1">{selectedAssets.join(', ')}</span>
+                </div>
+              </div>
+            </div>
+
+            {/* Saved Presets */}
+            <div className="border-t border-zinc-800 pt-4 mt-4">
+              <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Saved Presets</div>
+              {savedConfigs.length === 0 ? (
+                <p className="text-sm text-zinc-500 text-center py-4">No saved presets yet</p>
+              ) : (
+                <div className="space-y-2">
+                  {savedConfigs.map((cfg) => (
+                    <div
+                      key={cfg.name}
+                      className={`p-3 rounded border transition-colors ${
+                        selectedConfigName === cfg.name
+                          ? 'bg-cyan-500/10 border-cyan-500/30'
+                          : 'bg-zinc-800/50 border-zinc-700/50 hover:border-zinc-600'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between mb-2">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-zinc-200">{cfg.name}</span>
+                          {cfg.isDefault && (
+                            <span className="px-1.5 py-0.5 text-xs rounded bg-amber-500/20 text-amber-400 border border-amber-500/30">
+                              DEFAULT
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs text-zinc-500">
+                          {cfg.updatedAt ? new Date(cfg.updatedAt).toLocaleDateString() : ''}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-3 gap-2 text-xs font-mono mb-3">
+                        <div>
+                          <span className="text-zinc-500">Size:</span>
+                          <span className="text-zinc-300 ml-1">${cfg.positionSize}</span>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Warmup:</span>
+                          <span className="text-zinc-300 ml-1">{cfg.warmupSeconds}s</span>
+                        </div>
+                        <div>
+                          <span className="text-zinc-500">Assets:</span>
+                          <span className="text-zinc-300 ml-1">{cfg.selectedAssets.join(', ')}</span>
+                        </div>
+                      </div>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleLoadConfig(cfg.name)}
+                          className="flex-1 px-2 py-1 text-xs rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
+                        >
+                          Load
+                        </button>
+                        <button
+                          onClick={() => handleSetDefault(cfg.name)}
+                          className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                            cfg.isDefault
+                              ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                              : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
+                          }`}
+                        >
+                          {cfg.isDefault ? 'Unset Default' : 'Set as Default'}
+                        </button>
+                        <button
+                          onClick={() => handleDeleteConfig(cfg.name)}
+                          className="px-2 py-1 text-xs rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-600/30 transition-colors"
+                        >
+                          Delete
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           </>
         )}

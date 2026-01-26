@@ -10,6 +10,7 @@ import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
 import { useLiveData, setPositionSize, setSelectedAssets, setMomentumWarmup } from "@/hooks/useLiveData"
 import { setDualEntryPositionSize } from "@/strategies/dualEntry"
+import { loadDefaultConfig } from "@/lib/configStorage"
 
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -21,6 +22,24 @@ function App() {
   const [positionSize, setPositionSizeState] = useState(1) // Default $1
   const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
   const [warmupSeconds, setWarmupSecondsState] = useState(60) // Default 60 seconds warmup
+
+  // Load default config on startup
+  useEffect(() => {
+    const loadDefault = async () => {
+      const defaultConfig = await loadDefaultConfig()
+      if (defaultConfig) {
+        console.log('[CONFIG] Loading default preset:', defaultConfig.name)
+        setPositionSizeState(defaultConfig.positionSize)
+        setPositionSize(defaultConfig.positionSize)
+        setDualEntryPositionSize(defaultConfig.positionSize)
+        setSelectedAssetsState(defaultConfig.selectedAssets as Asset[])
+        setSelectedAssets(defaultConfig.selectedAssets as Asset[])
+        setWarmupSecondsState(defaultConfig.warmupSeconds)
+        setMomentumWarmup(defaultConfig.warmupSeconds)
+      }
+    }
+    loadDefault()
+  }, [])
 
   // Update both momentum and dual-entry configs when position size changes
   const handlePositionSizeChange = useCallback((size: number) => {
@@ -196,6 +215,8 @@ function App() {
                 onPositionSizeChange={handlePositionSizeChange}
                 warmupSeconds={warmupSeconds}
                 onWarmupChange={handleWarmupChange}
+                selectedAssets={selectedAssetsState}
+                onAssetsChange={handleAssetsChange}
               />
             </div>
             <div className="col-span-3">
