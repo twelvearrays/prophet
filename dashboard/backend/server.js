@@ -1420,10 +1420,10 @@ app.post('/api/audit/cleanup', (req, res) => {
 });
 
 // ============================================================================
-// CONFIG PRESETS API
+// CONFIG PRESETS API (Per-Strategy)
 // ============================================================================
 
-// Get all presets
+// Get all presets (across all strategies)
 app.get('/api/presets', (req, res) => {
   try {
     const presets = configPresets.getAllPresets();
@@ -1434,14 +1434,36 @@ app.get('/api/presets', (req, res) => {
   }
 });
 
-// Get default preset
-app.get('/api/presets/default', (req, res) => {
+// Get all defaults (one per strategy)
+app.get('/api/presets/defaults', (req, res) => {
   try {
-    const preset = configPresets.getDefaultPreset();
+    const defaults = configPresets.getAllDefaults();
+    res.json(defaults);
+  } catch (error) {
+    console.error('[PRESETS] Error getting defaults:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get presets for a specific strategy
+app.get('/api/presets/strategy/:strategy', (req, res) => {
+  try {
+    const presets = configPresets.getPresetsByStrategy(req.params.strategy);
+    res.json(presets);
+  } catch (error) {
+    console.error('[PRESETS] Error getting presets:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get default preset for a strategy
+app.get('/api/presets/strategy/:strategy/default', (req, res) => {
+  try {
+    const preset = configPresets.getDefaultPreset(req.params.strategy);
     if (preset) {
       res.json(preset);
     } else {
-      res.status(404).json({ error: 'No default preset set' });
+      res.status(404).json({ error: 'No default preset for this strategy' });
     }
   } catch (error) {
     console.error('[PRESETS] Error getting default preset:', error);
@@ -1449,10 +1471,10 @@ app.get('/api/presets/default', (req, res) => {
   }
 });
 
-// Get preset by name
-app.get('/api/presets/:name', (req, res) => {
+// Get preset by strategy and name
+app.get('/api/presets/strategy/:strategy/:name', (req, res) => {
   try {
-    const preset = configPresets.getPresetByName(req.params.name);
+    const preset = configPresets.getPreset(req.params.strategy, req.params.name);
     if (preset) {
       res.json(preset);
     } else {
@@ -1464,21 +1486,24 @@ app.get('/api/presets/:name', (req, res) => {
   }
 });
 
-// Save or update preset
-app.post('/api/presets', (req, res) => {
+// Save or update preset for a strategy
+app.post('/api/presets/strategy/:strategy', (req, res) => {
   try {
-    const { name, positionSize, warmupSeconds, selectedAssets, isDefault } = req.body;
+    const strategy = req.params.strategy;
+    const { name, config, isDefault } = req.body;
     if (!name) {
       return res.status(400).json({ error: 'Name is required' });
     }
+    if (!config) {
+      return res.status(400).json({ error: 'Config is required' });
+    }
     const preset = configPresets.savePreset({
+      strategy,
       name,
-      positionSize: positionSize ?? 1,
-      warmupSeconds: warmupSeconds ?? 60,
-      selectedAssets: selectedAssets ?? ['BTC'],
+      config,
       isDefault: isDefault ?? false,
     });
-    console.log('[PRESETS] Saved preset:', name);
+    console.log(`[PRESETS] Saved ${strategy}/${name}`);
     res.json(preset);
   } catch (error) {
     console.error('[PRESETS] Error saving preset:', error);
@@ -1486,12 +1511,12 @@ app.post('/api/presets', (req, res) => {
   }
 });
 
-// Set preset as default
-app.put('/api/presets/:name/default', (req, res) => {
+// Set preset as default for a strategy
+app.put('/api/presets/strategy/:strategy/:name/default', (req, res) => {
   try {
-    const preset = configPresets.setPresetAsDefault(req.params.name);
+    const preset = configPresets.setAsDefault(req.params.strategy, req.params.name);
     if (preset) {
-      console.log('[PRESETS] Set default:', req.params.name);
+      console.log(`[PRESETS] Set default: ${req.params.strategy}/${req.params.name}`);
       res.json(preset);
     } else {
       res.status(404).json({ error: 'Preset not found' });
@@ -1502,11 +1527,11 @@ app.put('/api/presets/:name/default', (req, res) => {
   }
 });
 
-// Clear default
-app.delete('/api/presets/default', (req, res) => {
+// Clear default for a strategy
+app.delete('/api/presets/strategy/:strategy/default', (req, res) => {
   try {
-    configPresets.clearDefault();
-    console.log('[PRESETS] Cleared default');
+    configPresets.clearDefault(req.params.strategy);
+    console.log(`[PRESETS] Cleared default for ${req.params.strategy}`);
     res.json({ success: true });
   } catch (error) {
     console.error('[PRESETS] Error clearing default:', error);
@@ -1515,10 +1540,10 @@ app.delete('/api/presets/default', (req, res) => {
 });
 
 // Delete preset
-app.delete('/api/presets/:name', (req, res) => {
+app.delete('/api/presets/strategy/:strategy/:name', (req, res) => {
   try {
-    configPresets.deletePreset(req.params.name);
-    console.log('[PRESETS] Deleted preset:', req.params.name);
+    configPresets.deletePreset(req.params.strategy, req.params.name);
+    console.log(`[PRESETS] Deleted ${req.params.strategy}/${req.params.name}`);
     res.json({ success: true });
   } catch (error) {
     console.error('[PRESETS] Error deleting preset:', error);

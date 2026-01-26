@@ -10,7 +10,7 @@ import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
 import { useSimulation } from "@/hooks/useSimulation"
 import { useLiveData, setPositionSize, setSelectedAssets, setMomentumWarmup } from "@/hooks/useLiveData"
 import { setDualEntryPositionSize } from "@/strategies/dualEntry"
-import { loadDefaultConfig } from "@/lib/configStorage"
+import { getDefaultPreset, type MomentumConfig } from "@/lib/configStorage"
 
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -23,19 +23,26 @@ function App() {
   const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
   const [warmupSeconds, setWarmupSecondsState] = useState(60) // Default 60 seconds warmup
 
-  // Load default config on startup
+  // Load default momentum config on startup
   useEffect(() => {
     const loadDefault = async () => {
-      const defaultConfig = await loadDefaultConfig()
-      if (defaultConfig) {
-        console.log('[CONFIG] Loading default preset:', defaultConfig.name)
-        setPositionSizeState(defaultConfig.positionSize)
-        setPositionSize(defaultConfig.positionSize)
-        setDualEntryPositionSize(defaultConfig.positionSize)
-        setSelectedAssetsState(defaultConfig.selectedAssets as Asset[])
-        setSelectedAssets(defaultConfig.selectedAssets as Asset[])
-        setWarmupSecondsState(defaultConfig.warmupSeconds)
-        setMomentumWarmup(defaultConfig.warmupSeconds)
+      const defaultPreset = await getDefaultPreset('momentum')
+      if (defaultPreset) {
+        const cfg = defaultPreset.config as unknown as MomentumConfig
+        console.log('[CONFIG] Loading default momentum preset:', defaultPreset.name)
+        if (cfg.positionSize !== undefined) {
+          setPositionSizeState(cfg.positionSize)
+          setPositionSize(cfg.positionSize)
+          setDualEntryPositionSize(cfg.positionSize)
+        }
+        if (cfg.selectedAssets) {
+          setSelectedAssetsState(cfg.selectedAssets as Asset[])
+          setSelectedAssets(cfg.selectedAssets as Asset[])
+        }
+        if (cfg.warmupSeconds !== undefined) {
+          setWarmupSecondsState(cfg.warmupSeconds)
+          setMomentumWarmup(cfg.warmupSeconds)
+        }
       }
     }
     loadDefault()

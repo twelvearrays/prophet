@@ -27,7 +27,7 @@ function SideBadge({ side, shares, size = "md" }: { side: "YES" | "NO"; shares: 
       }`}>
         {side}
       </span>
-      <span className={size === "lg" ? "text-lg" : ""}>{shares.toFixed(0)}</span>
+      <span className={size === "lg" ? "text-lg" : ""}>{shares < 1 ? shares.toFixed(1) : shares.toFixed(0)}</span>
     </span>
   )
 }
@@ -230,7 +230,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
                         {order.side}
                       </span>
                       <span className="text-zinc-300 font-mono text-sm">
-                        {order.shares.toFixed(0)} @ {formatPrice(order.price)}
+                        {order.shares < 1 ? order.shares.toFixed(1) : order.shares.toFixed(0)} @ {formatPrice(order.price)}
                       </span>
                     </div>
                     <span className={`text-xs font-mono ${
@@ -250,7 +250,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
                         YES
                       </span>
                       <span className="text-zinc-300 font-mono text-sm">
-                        {session.dualMakerState.filledYes.shares.toFixed(0)} @ {formatPrice(session.dualMakerState.filledYes.price)}
+                        {session.dualMakerState.filledYes.shares < 1 ? session.dualMakerState.filledYes.shares.toFixed(1) : session.dualMakerState.filledYes.shares.toFixed(0)} @ {formatPrice(session.dualMakerState.filledYes.price)}
                       </span>
                     </div>
                     <span className="text-xs font-mono text-emerald-400">FILLED ✓</span>
@@ -263,7 +263,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
                         NO
                       </span>
                       <span className="text-zinc-300 font-mono text-sm">
-                        {session.dualMakerState.filledNo.shares.toFixed(0)} @ {formatPrice(session.dualMakerState.filledNo.price)}
+                        {session.dualMakerState.filledNo.shares < 1 ? session.dualMakerState.filledNo.shares.toFixed(1) : session.dualMakerState.filledNo.shares.toFixed(0)} @ {formatPrice(session.dualMakerState.filledNo.price)}
                       </span>
                     </div>
                     <span className="text-xs font-mono text-emerald-400">FILLED ✓</span>
@@ -318,7 +318,7 @@ export function SessionDetail({ session }: SessionDetailProps) {
                     <span className="flex items-center gap-2">
                       <SideLabel side={fill.side} />
                       <span className="text-zinc-300">
-                        {fill.shares.toFixed(0)} @ {formatPrice(fill.price)}
+                        {fill.shares < 1 ? fill.shares.toFixed(1) : fill.shares.toFixed(0)} @ {formatPrice(fill.price)}
                       </span>
                     </span>
                     <span className="text-zinc-500">

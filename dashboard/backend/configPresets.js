@@ -1,5 +1,5 @@
 // Config Presets Storage - SQLite Backend
-// Stores trading configuration presets with default flag
+// Stores trading configuration presets per strategy with isDefault flag
 
 import initSqlJs from 'sql.js';
 import fs from 'fs';
@@ -38,19 +38,25 @@ export async function initPresetsDatabase() {
     console.log('[PRESETS DB] Created new database');
   }
 
-  // Create table
+  // Drop old table if exists (schema changed)
+  db.run(`DROP TABLE IF EXISTS config_presets`);
+
+  // Create table with strategy field
   db.run(`
-    CREATE TABLE IF NOT EXISTS config_presets (
+    CREATE TABLE IF NOT EXISTS strategy_presets (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT UNIQUE NOT NULL,
-      position_size INTEGER NOT NULL DEFAULT 1,
-      warmup_seconds INTEGER NOT NULL DEFAULT 60,
-      selected_assets TEXT NOT NULL DEFAULT 'BTC',
+      strategy TEXT NOT NULL,
+      name TEXT NOT NULL,
+      config TEXT NOT NULL,
       is_default INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL
+      updated_at INTEGER NOT NULL,
+      UNIQUE(strategy, name)
     )
   `);
+
+  // Create index for fast default lookup
+  db.run(`CREATE INDEX IF NOT EXISTS idx_strategy_default ON strategy_presets(strategy, is_default)`);
 
   saveDatabase();
   return db;
@@ -67,152 +73,221 @@ function saveDatabase() {
 }
 
 /**
- * Get all presets
+ * Get all presets for a strategy
+ */
+export function getPresetsByStrategy(strategy) {
+  if (!db) throw new Error('Database not initialized');
+
+  const stmt = db.prepare(`
+    SELECT id, strategy, name, config, is_default, created_at, updated_at
+    FROM strategy_presets
+    WHERE strategy = ?
+    ORDER BY name ASC
+  `);
+  stmt.bind([strategy]);
+
+  const results = [];
+  while (stmt.step()) {
+    const row = stmt.getAsObject();
+    results.push({
+      id: row.id,
+      strategy: row.strategy,
+      name: row.name,
+      config: JSON.parse(row.config),
+      isDefault: row.is_default === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    });
+  }
+  stmt.free();
+  return results;
+}
+
+/**
+ * Get all presets (all strategies)
  */
 export function getAllPresets() {
   if (!db) throw new Error('Database not initialized');
 
   const results = db.exec(`
-    SELECT id, name, position_size, warmup_seconds, selected_assets, is_default, created_at, updated_at
-    FROM config_presets
-    ORDER BY name ASC
+    SELECT id, strategy, name, config, is_default, created_at, updated_at
+    FROM strategy_presets
+    ORDER BY strategy, name ASC
   `);
 
   if (!results.length) return [];
 
   return results[0].values.map(row => ({
     id: row[0],
-    name: row[1],
-    positionSize: row[2],
-    warmupSeconds: row[3],
-    selectedAssets: row[4].split(','),
-    isDefault: row[5] === 1,
-    createdAt: row[6],
-    updatedAt: row[7],
+    strategy: row[1],
+    name: row[2],
+    config: JSON.parse(row[3]),
+    isDefault: row[4] === 1,
+    createdAt: row[5],
+    updatedAt: row[6],
   }));
 }
 
 /**
- * Get a preset by name
+ * Get a preset by strategy and name
  */
-export function getPresetByName(name) {
+export function getPreset(strategy, name) {
   if (!db) throw new Error('Database not initialized');
 
-  const results = db.exec(`
-    SELECT id, name, position_size, warmup_seconds, selected_assets, is_default, created_at, updated_at
-    FROM config_presets
-    WHERE name = ?
-  `, [name]);
+  const stmt = db.prepare(`
+    SELECT id, strategy, name, config, is_default, created_at, updated_at
+    FROM strategy_presets
+    WHERE strategy = ? AND name = ?
+  `);
+  stmt.bind([strategy, name]);
 
-  if (!results.length || !results[0].values.length) return null;
-
-  const row = results[0].values[0];
-  return {
-    id: row[0],
-    name: row[1],
-    positionSize: row[2],
-    warmupSeconds: row[3],
-    selectedAssets: row[4].split(','),
-    isDefault: row[5] === 1,
-    createdAt: row[6],
-    updatedAt: row[7],
-  };
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    stmt.free();
+    return {
+      id: row.id,
+      strategy: row.strategy,
+      name: row.name,
+      config: JSON.parse(row.config),
+      isDefault: row.is_default === 1,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+  stmt.free();
+  return null;
 }
 
 /**
- * Get the default preset
+ * Get the default preset for a strategy
  */
-export function getDefaultPreset() {
+export function getDefaultPreset(strategy) {
+  if (!db) throw new Error('Database not initialized');
+
+  const stmt = db.prepare(`
+    SELECT id, strategy, name, config, is_default, created_at, updated_at
+    FROM strategy_presets
+    WHERE strategy = ? AND is_default = 1
+    LIMIT 1
+  `);
+  stmt.bind([strategy]);
+
+  if (stmt.step()) {
+    const row = stmt.getAsObject();
+    stmt.free();
+    return {
+      id: row.id,
+      strategy: row.strategy,
+      name: row.name,
+      config: JSON.parse(row.config),
+      isDefault: true,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
+  }
+  stmt.free();
+  return null;
+}
+
+/**
+ * Get all default presets (one per strategy)
+ */
+export function getAllDefaults() {
   if (!db) throw new Error('Database not initialized');
 
   const results = db.exec(`
-    SELECT id, name, position_size, warmup_seconds, selected_assets, is_default, created_at, updated_at
-    FROM config_presets
+    SELECT id, strategy, name, config, is_default, created_at, updated_at
+    FROM strategy_presets
     WHERE is_default = 1
-    LIMIT 1
   `);
 
-  if (!results.length || !results[0].values.length) return null;
+  if (!results.length) return [];
 
-  const row = results[0].values[0];
-  return {
+  return results[0].values.map(row => ({
     id: row[0],
-    name: row[1],
-    positionSize: row[2],
-    warmupSeconds: row[3],
-    selectedAssets: row[4].split(','),
+    strategy: row[1],
+    name: row[2],
+    config: JSON.parse(row[3]),
     isDefault: true,
-    createdAt: row[6],
-    updatedAt: row[7],
-  };
+    createdAt: row[5],
+    updatedAt: row[6],
+  }));
 }
 
 /**
  * Save or update a preset
  */
-export function savePreset({ name, positionSize, warmupSeconds, selectedAssets, isDefault = false }) {
+export function savePreset({ strategy, name, config, isDefault = false }) {
   if (!db) throw new Error('Database not initialized');
 
   const now = Date.now();
-  const assetsStr = Array.isArray(selectedAssets) ? selectedAssets.join(',') : selectedAssets;
+  const configJson = JSON.stringify(config);
 
-  // If setting as default, clear other defaults first
+  // If setting as default, clear other defaults for this strategy first
   if (isDefault) {
-    db.run(`UPDATE config_presets SET is_default = 0 WHERE is_default = 1`);
+    db.run(`UPDATE strategy_presets SET is_default = 0 WHERE strategy = ?`, [strategy]);
   }
 
   // Check if preset exists
-  const existing = getPresetByName(name);
+  const existing = getPreset(strategy, name);
 
   if (existing) {
     // Update
     db.run(`
-      UPDATE config_presets
-      SET position_size = ?, warmup_seconds = ?, selected_assets = ?, is_default = ?, updated_at = ?
-      WHERE name = ?
-    `, [positionSize, warmupSeconds, assetsStr, isDefault ? 1 : 0, now, name]);
+      UPDATE strategy_presets
+      SET config = ?, is_default = ?, updated_at = ?
+      WHERE strategy = ? AND name = ?
+    `, [configJson, isDefault ? 1 : 0, now, strategy, name]);
   } else {
     // Insert
     db.run(`
-      INSERT INTO config_presets (name, position_size, warmup_seconds, selected_assets, is_default, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
-    `, [name, positionSize, warmupSeconds, assetsStr, isDefault ? 1 : 0, now, now]);
+      INSERT INTO strategy_presets (strategy, name, config, is_default, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `, [strategy, name, configJson, isDefault ? 1 : 0, now, now]);
   }
 
   saveDatabase();
-  return getPresetByName(name);
+  console.log(`[PRESETS] Saved ${strategy}/${name} (default: ${isDefault})`);
+  return getPreset(strategy, name);
 }
 
 /**
- * Set a preset as default (clears other defaults)
+ * Set a preset as default (clears other defaults for that strategy)
  */
-export function setPresetAsDefault(name) {
+export function setAsDefault(strategy, name) {
   if (!db) throw new Error('Database not initialized');
 
-  // Clear all defaults
-  db.run(`UPDATE config_presets SET is_default = 0`);
+  // Clear all defaults for this strategy
+  db.run(`UPDATE strategy_presets SET is_default = 0 WHERE strategy = ?`, [strategy]);
 
   // Set this one as default
-  db.run(`UPDATE config_presets SET is_default = 1, updated_at = ? WHERE name = ?`, [Date.now(), name]);
+  db.run(`
+    UPDATE strategy_presets
+    SET is_default = 1, updated_at = ?
+    WHERE strategy = ? AND name = ?
+  `, [Date.now(), strategy, name]);
 
   saveDatabase();
-  return getPresetByName(name);
+  console.log(`[PRESETS] Set default: ${strategy}/${name}`);
+  return getPreset(strategy, name);
 }
 
 /**
- * Clear the default preset
+ * Clear the default for a strategy
  */
-export function clearDefault() {
+export function clearDefault(strategy) {
   if (!db) throw new Error('Database not initialized');
-  db.run(`UPDATE config_presets SET is_default = 0`);
+  db.run(`UPDATE strategy_presets SET is_default = 0 WHERE strategy = ?`, [strategy]);
   saveDatabase();
+  console.log(`[PRESETS] Cleared default for ${strategy}`);
 }
 
 /**
  * Delete a preset
  */
-export function deletePreset(name) {
+export function deletePreset(strategy, name) {
   if (!db) throw new Error('Database not initialized');
-  db.run(`DELETE FROM config_presets WHERE name = ?`, [name]);
+  db.run(`DELETE FROM strategy_presets WHERE strategy = ? AND name = ?`, [strategy, name]);
   saveDatabase();
+  console.log(`[PRESETS] Deleted ${strategy}/${name}`);
 }

@@ -54,7 +54,7 @@ export function ActivityFeed({ actions }: ActivityFeedProps) {
                   </div>
                   <div className="text-right flex items-center gap-2">
                     <div className="flex items-center gap-1.5 font-mono">
-                      <span className="text-zinc-300">{action.targetShares.toFixed(0)}</span>
+                      <span className="text-zinc-300">{action.targetShares < 1 ? action.targetShares.toFixed(1) : action.targetShares.toFixed(0)}</span>
                       <SideLabel side={action.side} />
                       <span className="text-zinc-500">@</span>
                       {action.fillPrice ? (

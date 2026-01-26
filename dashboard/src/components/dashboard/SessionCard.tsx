@@ -38,7 +38,7 @@ function SideBadge({ side, shares }: { side: "YES" | "NO"; shares: number }) {
       }`}>
         {side}
       </span>
-      <span>{shares.toFixed(0)}</span>
+      <span>{shares < 1 ? shares.toFixed(1) : shares.toFixed(0)}</span>
     </span>
   )
 }
