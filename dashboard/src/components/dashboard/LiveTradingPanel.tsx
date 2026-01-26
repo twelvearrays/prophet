@@ -7,22 +7,16 @@ type Asset = typeof AVAILABLE_ASSETS[number]
 
 interface LiveTradingPanelProps {
   onStatusChange?: (isLive: boolean) => void
-  onPositionSizeChange?: (size: number) => void
   onAssetsChange?: (assets: Asset[]) => void
-  onWarmupChange?: (seconds: number) => void
   positionSize?: number
   selectedAssets?: Asset[]
-  warmupSeconds?: number
 }
 
 export function LiveTradingPanel({
   onStatusChange,
-  onPositionSizeChange,
   onAssetsChange,
-  onWarmupChange,
   positionSize = 1,
   selectedAssets = ['BTC'],
-  warmupSeconds = 60,
 }: LiveTradingPanelProps) {
   const [status, setStatus] = useState<TradingStatus | null>(null)
   const [isLoading, setIsLoading] = useState(false)
@@ -30,7 +24,6 @@ export function LiveTradingPanel({
   const [balance, setBalance] = useState<number | null>(null)
   const [localPositionSize, setLocalPositionSize] = useState(positionSize)
   const [localAssets, setLocalAssets] = useState<Asset[]>(selectedAssets)
-  const [localWarmup, setLocalWarmup] = useState(warmupSeconds)
 
   // Sync with external props
   useEffect(() => {
@@ -40,10 +33,6 @@ export function LiveTradingPanel({
   useEffect(() => {
     setLocalAssets(selectedAssets)
   }, [selectedAssets])
-
-  useEffect(() => {
-    setLocalWarmup(warmupSeconds)
-  }, [warmupSeconds])
 
   // Check status on mount
   useEffect(() => {
@@ -91,30 +80,6 @@ export function LiveTradingPanel({
     onStatusChange?.(false)
   }
 
-  const handlePositionSizeChange = (delta: number) => {
-    const newSize = Math.max(1, Math.min(100, localPositionSize + delta))
-    setLocalPositionSize(newSize)
-    onPositionSizeChange?.(newSize)
-
-    // Update backend if live
-    if (status?.enabled) {
-      tradingApi.updateConfig({ investmentPerSide: newSize }).catch(console.error)
-    }
-  }
-
-  const handlePositionSizeInput = (value: string) => {
-    const num = parseInt(value, 10)
-    if (!isNaN(num) && num >= 1 && num <= 100) {
-      setLocalPositionSize(num)
-      onPositionSizeChange?.(num)
-
-      // Update backend if live
-      if (status?.enabled) {
-        tradingApi.updateConfig({ investmentPerSide: num }).catch(console.error)
-      }
-    }
-  }
-
   const toggleAsset = (asset: Asset) => {
     const newAssets = localAssets.includes(asset)
       ? localAssets.filter(a => a !== asset)
@@ -125,20 +90,6 @@ export function LiveTradingPanel({
 
     setLocalAssets(newAssets)
     onAssetsChange?.(newAssets)
-  }
-
-  const handleWarmupChange = (delta: number) => {
-    const newWarmup = Math.max(0, Math.min(720, localWarmup + delta))
-    setLocalWarmup(newWarmup)
-    onWarmupChange?.(newWarmup)
-  }
-
-  const handleWarmupInput = (value: string) => {
-    const num = parseInt(value, 10)
-    if (!isNaN(num) && num >= 0 && num <= 720) {
-      setLocalWarmup(num)
-      onWarmupChange?.(num)
-    }
   }
 
   const isLive = status?.enabled ?? false
@@ -194,98 +145,10 @@ export function LiveTradingPanel({
           </div>
         </div>
 
-        {/* Position Size Control */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-zinc-500">Position Size (per side)</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handlePositionSizeChange(-5)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              -5
-            </button>
-            <button
-              onClick={() => handlePositionSizeChange(-1)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              -1
-            </button>
-            <div className="flex-1 flex items-center justify-center">
-              <span className="text-lg font-mono text-zinc-100">$</span>
-              <input
-                type="number"
-                value={localPositionSize}
-                onChange={(e) => handlePositionSizeInput(e.target.value)}
-                className="w-12 text-lg font-mono text-zinc-100 bg-transparent border-none text-center focus:outline-none focus:ring-1 focus:ring-zinc-600 rounded"
-                min={1}
-                max={100}
-              />
-            </div>
-            <button
-              onClick={() => handlePositionSizeChange(1)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              +1
-            </button>
-            <button
-              onClick={() => handlePositionSizeChange(5)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              +5
-            </button>
-          </div>
-          <div className="text-xs text-zinc-600 text-center">
-            Total per trade: ${localPositionSize * 2} (${localPositionSize} YES + ${localPositionSize} NO)
-          </div>
-        </div>
-
-        {/* Warmup Control (Momentum Strategy) */}
-        <div className="space-y-2">
-          <div className="flex items-center justify-between">
-            <span className="text-xs text-zinc-500">Momentum Warmup</span>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => handleWarmupChange(-30)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              -30
-            </button>
-            <button
-              onClick={() => handleWarmupChange(-10)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              -10
-            </button>
-            <div className="flex-1 flex items-center justify-center">
-              <input
-                type="number"
-                value={localWarmup}
-                onChange={(e) => handleWarmupInput(e.target.value)}
-                className="w-14 text-lg font-mono text-zinc-100 bg-transparent border-none text-center focus:outline-none focus:ring-1 focus:ring-zinc-600 rounded"
-                min={0}
-                max={720}
-              />
-              <span className="text-sm font-mono text-zinc-400 ml-1">sec</span>
-            </div>
-            <button
-              onClick={() => handleWarmupChange(10)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              +10
-            </button>
-            <button
-              onClick={() => handleWarmupChange(30)}
-              className="px-2 py-1 text-sm font-medium rounded bg-zinc-800 text-zinc-300 hover:bg-zinc-700 transition-colors"
-            >
-              +30
-            </button>
-          </div>
-          <div className="text-xs text-zinc-600 text-center">
-            Wait before first momentum trade (0 = no warmup)
-          </div>
+        {/* Position Size Display */}
+        <div className="flex items-center justify-between text-xs">
+          <span className="text-zinc-500">Position Size</span>
+          <span className="font-mono text-zinc-300">${localPositionSize}/side</span>
         </div>
 
         {isLive ? (

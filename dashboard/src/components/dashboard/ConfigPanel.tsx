@@ -83,7 +83,19 @@ function ConfigToggle({ configKey, value, onChange, disabled }: ConfigToggleProp
 
 type TabType = 'momentum' | 'dualEntry' | 'system'
 
-export function ConfigPanel() {
+interface ConfigPanelProps {
+  positionSize?: number
+  onPositionSizeChange?: (size: number) => void
+  warmupSeconds?: number
+  onWarmupChange?: (seconds: number) => void
+}
+
+export function ConfigPanel({
+  positionSize = 1,
+  onPositionSizeChange,
+  warmupSeconds = 60,
+  onWarmupChange,
+}: ConfigPanelProps) {
   const {
     config,
     isLoading,
@@ -171,7 +183,99 @@ export function ConfigPanel() {
       <div className="p-4 space-y-4 max-h-[500px] overflow-y-auto">
         {activeTab === 'momentum' && (
           <>
-            <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Entry & Scaling</div>
+            {/* Live Trading Config */}
+            <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Position & Timing</div>
+
+            {/* Position Size Control */}
+            <div className="space-y-1 mb-4">
+              <div className="flex justify-between items-center">
+                <label className="text-sm text-zinc-300">Position Size (per side)</label>
+                <span className="text-sm font-mono text-cyan-400">${positionSize}</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => onPositionSizeChange?.(Math.max(1, positionSize - 5))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  -5
+                </button>
+                <button
+                  onClick={() => onPositionSizeChange?.(Math.max(1, positionSize - 1))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  -1
+                </button>
+                <input
+                  type="range"
+                  min={1}
+                  max={100}
+                  value={positionSize}
+                  onChange={(e) => onPositionSizeChange?.(parseInt(e.target.value))}
+                  className="flex-1 h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                />
+                <button
+                  onClick={() => onPositionSizeChange?.(Math.min(100, positionSize + 1))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  +1
+                </button>
+                <button
+                  onClick={() => onPositionSizeChange?.(Math.min(100, positionSize + 5))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  +5
+                </button>
+              </div>
+              <p className="text-xs text-zinc-500">Total per trade: ${positionSize * 2} (${positionSize} YES + ${positionSize} NO)</p>
+            </div>
+
+            {/* Warmup Control */}
+            <div className="space-y-1 mb-4">
+              <div className="flex justify-between items-center">
+                <label className="text-sm text-zinc-300">Warmup Time</label>
+                <span className="text-sm font-mono text-cyan-400">{warmupSeconds}s ({(warmupSeconds / 60).toFixed(1)} min)</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => onWarmupChange?.(Math.max(0, warmupSeconds - 60))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  -1m
+                </button>
+                <button
+                  onClick={() => onWarmupChange?.(Math.max(0, warmupSeconds - 10))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  -10s
+                </button>
+                <input
+                  type="range"
+                  min={0}
+                  max={720}
+                  step={10}
+                  value={warmupSeconds}
+                  onChange={(e) => onWarmupChange?.(parseInt(e.target.value))}
+                  className="flex-1 h-2 bg-zinc-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+                />
+                <button
+                  onClick={() => onWarmupChange?.(Math.min(720, warmupSeconds + 10))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  +10s
+                </button>
+                <button
+                  onClick={() => onWarmupChange?.(Math.min(720, warmupSeconds + 60))}
+                  className="px-2 py-1 text-xs font-medium rounded bg-zinc-700 text-zinc-300 hover:bg-zinc-600 transition-colors"
+                >
+                  +1m
+                </button>
+              </div>
+              <p className="text-xs text-zinc-500">Wait before first momentum trade (0 = no warmup, max 12 min)</p>
+            </div>
+
+            <div className="border-t border-zinc-800 pt-4 mt-4">
+              <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Entry & Scaling</div>
+            </div>
             <ConfigSlider
               configKey="momentum.positionSize"
               value={config.momentum.positionSize}

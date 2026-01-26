@@ -191,17 +191,19 @@ function App() {
         {showConfig && (
           <div className="mb-4 grid grid-cols-12 gap-4">
             <div className="col-span-9">
-              <ConfigPanel />
+              <ConfigPanel
+                positionSize={positionSize}
+                onPositionSizeChange={handlePositionSizeChange}
+                warmupSeconds={warmupSeconds}
+                onWarmupChange={handleWarmupChange}
+              />
             </div>
             <div className="col-span-3">
               <LiveTradingPanel
                 onStatusChange={setIsLiveTrading}
                 positionSize={positionSize}
-                onPositionSizeChange={handlePositionSizeChange}
                 selectedAssets={selectedAssetsState}
                 onAssetsChange={handleAssetsChange}
-                warmupSeconds={warmupSeconds}
-                onWarmupChange={handleWarmupChange}
               />
             </div>
           </div>
