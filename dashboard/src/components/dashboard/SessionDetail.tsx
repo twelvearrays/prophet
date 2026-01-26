@@ -96,46 +96,20 @@ export function SessionDetail({ session }: SessionDetailProps) {
             <p className="text-sm text-zinc-400">{session.marketName}</p>
           )}
 
-          {/* Asset Price Display - Up/Down Market */}
-          {session.currentAssetPrice && (
-            <div className="mt-3 p-3 bg-zinc-800/50 rounded-lg border border-zinc-700/50">
-              <div className="flex items-center justify-between gap-4">
-                <div className="flex-1">
-                  <p className="text-xs text-zinc-500 uppercase tracking-wide">
-                    {session.asset} Live Price
-                  </p>
-                  <p className="font-mono text-xl text-white">
-                    ${session.currentAssetPrice.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </p>
-                </div>
-                <div className="flex-1 text-right">
-                  <p className="text-xs text-zinc-500 uppercase tracking-wide">
-                    Market Type
-                  </p>
-                  <p className="font-mono text-lg text-amber-400">
-                    Up or Down
-                  </p>
-                </div>
+          {/* Compact Liquidity Display */}
+          {session.currentTick && (
+            <div className="mt-2 flex items-center gap-4 text-xs font-mono">
+              <div className="flex items-center gap-1.5">
+                <span className="text-emerald-400">YES:</span>
+                <span className={session.currentTick.yesLiquidity >= 50 ? "text-zinc-300" : "text-amber-400"}>
+                  ${session.currentTick.yesLiquidity.toFixed(0)}
+                </span>
               </div>
-              {/* Liquidity Display */}
-              {session.currentTick && (
-                <div className="mt-2 pt-2 border-t border-zinc-700/50 flex justify-between text-xs font-mono">
-                  <div className="flex items-center gap-2">
-                    <span className="text-emerald-400">YES Liq:</span>
-                    <span className={session.currentTick.yesLiquidity >= 50 ? "text-white" : "text-amber-400"}>
-                      ${session.currentTick.yesLiquidity.toFixed(0)}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-rose-400">NO Liq:</span>
-                    <span className={session.currentTick.noLiquidity >= 50 ? "text-white" : "text-amber-400"}>
-                      ${session.currentTick.noLiquidity.toFixed(0)}
-                    </span>
-                  </div>
-                </div>
-              )}
-              <div className="mt-2 text-xs text-center text-zinc-500">
-                <span className="text-emerald-400">UP</span> wins if price at end ≥ price at start • <span className="text-rose-400">DOWN</span> wins if price drops
+              <div className="flex items-center gap-1.5">
+                <span className="text-rose-400">NO:</span>
+                <span className={session.currentTick.noLiquidity >= 50 ? "text-zinc-300" : "text-amber-400"}>
+                  ${session.currentTick.noLiquidity.toFixed(0)}
+                </span>
               </div>
             </div>
           )}

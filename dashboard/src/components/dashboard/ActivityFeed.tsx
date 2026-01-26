@@ -28,14 +28,14 @@ function SideLabel({ side }: { side: "YES" | "NO" }) {
 }
 
 export function ActivityFeed({ actions }: ActivityFeedProps) {
-  const filtered = actions.filter((a) => a.type !== "NONE").slice(-10).reverse()
+  const filtered = actions.filter((a) => a.type !== "NONE").slice(-25).reverse()
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/50">
       <div className="p-3 border-b border-zinc-800">
         <h3 className="text-sm font-medium text-zinc-300">Recent Actions</h3>
       </div>
-      <div className="max-h-[200px] overflow-y-auto">
+      <div className="max-h-[400px] overflow-y-auto">
         {filtered.length === 0 ? (
           <div className="p-4 text-center text-zinc-500 text-sm">
             No actions yet
