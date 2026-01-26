@@ -137,18 +137,24 @@ export function ConfigPanel({
   const [presetStrategy, setPresetStrategy] = useState<StrategyType>('momentum')
   const [selectedPresetName, setSelectedPresetName] = useState<string | null>(null)
 
-  // Load presets for both strategies on mount
+  // Load presets for both strategies on mount and when tab changes to presets
   useEffect(() => {
     const loadAllPresets = async () => {
-      const [momentum, dualEntry] = await Promise.all([
-        getPresetsByStrategy('momentum'),
-        getPresetsByStrategy('dualEntry'),
-      ])
-      setMomentumPresets(momentum)
-      setDualEntryPresets(dualEntry)
+      console.log('[CONFIG] Loading presets...')
+      try {
+        const [momentum, dualEntry] = await Promise.all([
+          getPresetsByStrategy('momentum'),
+          getPresetsByStrategy('dualEntry'),
+        ])
+        console.log('[CONFIG] Loaded presets:', { momentum: momentum.length, dualEntry: dualEntry.length })
+        setMomentumPresets(momentum)
+        setDualEntryPresets(dualEntry)
+      } catch (err) {
+        console.error('[CONFIG] Failed to load presets:', err)
+      }
     }
     loadAllPresets()
-  }, [])
+  }, [activeTab]) // Reload when switching tabs
 
   // Refresh presets for a specific strategy
   const refreshPresets = async (strategy: StrategyType) => {
@@ -210,14 +216,21 @@ export function ConfigPanel({
     }
   }
 
-  const handleLoadPreset = async (strategy: StrategyType, name: string) => {
+  const handleLoadPreset = async (strategy: StrategyType, name: string, andRestart = false) => {
     const preset = await getPreset(strategy, name)
     if (preset) {
+      console.log(`[CONFIG] Loading preset: ${strategy}/${name}`, preset.config)
       const cfg = preset.config as unknown as MomentumConfig | DualEntryConfig
       if ('positionSize' in cfg) onPositionSizeChange?.(cfg.positionSize)
       if ('warmupSeconds' in cfg) onWarmupChange?.((cfg as MomentumConfig).warmupSeconds)
       if ('selectedAssets' in cfg) onAssetsChange?.(cfg.selectedAssets as Asset[])
       setSelectedPresetName(name)
+
+      // Optionally restart sessions to apply changes to active trading
+      if (andRestart) {
+        await syncToBackend()
+        await restartSessions()
+      }
     }
   }
 
@@ -656,25 +669,31 @@ export function ConfigPanel({
                         <div className="flex gap-2">
                           <button
                             onClick={() => handleLoadPreset('momentum', preset.name)}
-                            className="flex-1 px-2 py-1 text-xs rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
+                            className="px-2 py-1 text-xs rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
                           >
                             Load
                           </button>
                           <button
+                            onClick={() => handleLoadPreset('momentum', preset.name, true)}
+                            className="px-2 py-1 text-xs rounded bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
+                          >
+                            Load & Restart
+                          </button>
+                          <button
                             onClick={() => handleSetDefault('momentum', preset.name, preset.isDefault)}
-                            className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                            className={`px-2 py-1 text-xs rounded transition-colors ${
                               preset.isDefault
                                 ? 'bg-amber-600 hover:bg-amber-500 text-white'
                                 : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
                             }`}
                           >
-                            {preset.isDefault ? 'Unset Default' : 'Set as Default'}
+                            {preset.isDefault ? 'Unset' : 'Default'}
                           </button>
                           <button
                             onClick={() => handleDeletePreset('momentum', preset.name)}
                             className="px-2 py-1 text-xs rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-600/30 transition-colors"
                           >
-                            Delete
+                            ×
                           </button>
                         </div>
                       </div>
@@ -732,25 +751,31 @@ export function ConfigPanel({
                         <div className="flex gap-2">
                           <button
                             onClick={() => handleLoadPreset('dualEntry', preset.name)}
-                            className="flex-1 px-2 py-1 text-xs rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
+                            className="px-2 py-1 text-xs rounded bg-zinc-700 hover:bg-zinc-600 text-zinc-300 transition-colors"
                           >
                             Load
                           </button>
                           <button
+                            onClick={() => handleLoadPreset('dualEntry', preset.name, true)}
+                            className="px-2 py-1 text-xs rounded bg-cyan-600 hover:bg-cyan-500 text-white transition-colors"
+                          >
+                            Load & Restart
+                          </button>
+                          <button
                             onClick={() => handleSetDefault('dualEntry', preset.name, preset.isDefault)}
-                            className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+                            className={`px-2 py-1 text-xs rounded transition-colors ${
                               preset.isDefault
                                 ? 'bg-amber-600 hover:bg-amber-500 text-white'
                                 : 'bg-zinc-700 hover:bg-zinc-600 text-zinc-300'
                             }`}
                           >
-                            {preset.isDefault ? 'Unset Default' : 'Set as Default'}
+                            {preset.isDefault ? 'Unset' : 'Default'}
                           </button>
                           <button
                             onClick={() => handleDeletePreset('dualEntry', preset.name)}
                             className="px-2 py-1 text-xs rounded bg-rose-600/20 hover:bg-rose-600/30 text-rose-400 border border-rose-600/30 transition-colors"
                           >
-                            Delete
+                            ×
                           </button>
                         </div>
                       </div>
@@ -758,6 +783,17 @@ export function ConfigPanel({
                   })}
                 </div>
               )}
+            </div>
+
+            {/* Info note */}
+            <div className="mt-4 p-3 bg-zinc-800/30 rounded border border-zinc-700/50">
+              <p className="text-xs text-zinc-500">
+                <strong className="text-zinc-400">Load</strong> applies settings instantly (no restart needed for new trades).
+                <br />
+                <strong className="text-cyan-400">Load & Restart</strong> also restarts active sessions to apply changes immediately.
+                <br />
+                <strong className="text-amber-400">Default</strong> presets auto-load when the dashboard starts.
+              </p>
             </div>
           </>
         )}

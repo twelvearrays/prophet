@@ -153,6 +153,9 @@ export function logEntry(params) {
   const now = Date.now();
 
   try {
+    // sql.js doesn't handle undefined - convert to null
+    const toNull = (v) => v === undefined ? null : v;
+
     db.run(`
       INSERT INTO audit_entries (
         id, timestamp, session_id, asset, strategy, event_type, severity,
@@ -169,21 +172,21 @@ export function logEntry(params) {
       params.strategy,
       params.eventType,
       params.severity || 'info',
-      params.yesPrice,
-      params.noPrice,
-      params.yesLiquidity,
-      params.noLiquidity,
-      params.timeRemainingMs,
-      params.position?.side,
-      params.position?.shares,
-      params.position?.avgPrice,
-      params.position?.unrealizedPnl,
-      params.decision?.action,
-      params.decision?.reason,
+      toNull(params.yesPrice),
+      toNull(params.noPrice),
+      toNull(params.yesLiquidity),
+      toNull(params.noLiquidity),
+      toNull(params.timeRemainingMs),
+      toNull(params.position?.side),
+      toNull(params.position?.shares),
+      toNull(params.position?.avgPrice),
+      toNull(params.position?.unrealizedPnl),
+      toNull(params.decision?.action),
+      toNull(params.decision?.reason),
       params.decision ? JSON.stringify(params.decision) : null,
-      params.outcome?.fillPrice,
-      params.outcome?.shares,
-      params.outcome?.pnl,
+      toNull(params.outcome?.fillPrice),
+      toNull(params.outcome?.shares),
+      toNull(params.outcome?.pnl),
     ]);
 
     // Update or create session
@@ -191,7 +194,7 @@ export function logEntry(params) {
 
     return { id, timestamp: now };
   } catch (e) {
-    console.error('[AUDIT DB] Failed to log entry:', e.message);
+    console.error('[AUDIT DB] Failed to log entry:', e?.message || e);
     return null;
   }
 }
@@ -200,21 +203,29 @@ export function logEntry(params) {
  * Update or insert session record
  */
 function upsertSession(params) {
-  const existing = db.exec(`SELECT * FROM sessions WHERE session_id = ?`, [params.sessionId]);
+  try {
+    // Use prepared statement for SELECT
+    const stmt = db.prepare(`SELECT session_id FROM sessions WHERE session_id = ?`);
+    stmt.bind([params.sessionId]);
+    const exists = stmt.step();
+    stmt.free();
 
-  if (existing.length === 0 || existing[0].values.length === 0) {
-    // Create new session
-    db.run(`
-      INSERT INTO sessions (session_id, asset, strategy, market_id, start_time, end_time)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `, [
-      params.sessionId,
-      params.asset,
-      params.strategy,
-      params.sessionId.replace(/-mom$|-dual$/, ''),
-      params.timestamp || Date.now(),
-      params.endTime,
-    ]);
+    if (!exists) {
+      // Create new session
+      db.run(`
+        INSERT INTO sessions (session_id, asset, strategy, market_id, start_time, end_time)
+        VALUES (?, ?, ?, ?, ?, ?)
+      `, [
+        params.sessionId,
+        params.asset,
+        params.strategy,
+        params.sessionId.replace(/-mom$|-dual$/, ''),
+        params.timestamp || Date.now(),
+        params.endTime,
+      ]);
+    }
+  } catch (e) {
+    console.error('[AUDIT DB] Failed to upsert session:', e?.message || e);
   }
 
   // Update session stats based on event type

@@ -29,6 +29,21 @@ const rawClobClient = new ClobClient(
 // Store original console.error ONCE at module load to prevent recursion
 const _originalConsoleError = console.error.bind(console);
 
+// Global suppression of CLOB Client verbose error logs
+// These 404s are expected for markets that haven't started or have expired
+console.error = (...args) => {
+  const firstArg = args[0];
+  // Suppress CLOB Client request errors (they log full axios configs)
+  if (typeof firstArg === 'string' && firstArg.includes('[CLOB Client]')) {
+    return;
+  }
+  // Also suppress if it's an object that looks like an axios error config
+  if (typeof firstArg === 'object' && firstArg?.config?.url?.includes('clob.polymarket.com')) {
+    return;
+  }
+  _originalConsoleError(...args);
+};
+
 // Wrapper to suppress verbose CLOB client error logs for expected 404s
 // The library logs full request configs which spam the console
 const clobClient = {
