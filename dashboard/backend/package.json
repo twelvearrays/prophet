@@ -9,6 +9,7 @@
     "test:live": "node test-live-trade.js"
   },
   "dependencies": {
+    "@polybased/sdk": "^0.8.1",
     "@polymarket/clob-client": "^4.3.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",

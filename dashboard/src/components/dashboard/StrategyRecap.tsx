@@ -36,15 +36,15 @@ const DUAL_ENTRY_DESCRIPTION = {
   phases: [
     { state: "WAITING", desc: "Ready to place maker orders" },
     { state: "ENTERING", desc: "4 limit orders placed, waiting for fills" },
-    { state: "WAITING_LOSER", desc: "Both sides filled, watching for -15% loser" },
-    { state: "WAITING_WINNER", desc: "Loser sold, holding for +20% winner" },
+    { state: "WAITING_LOSER", desc: "Both sides filled, watching for -10% loser" },
+    { state: "WAITING_WINNER", desc: "Loser sold, holding for +30% winner" },
     { state: "CLOSED", desc: "Both sides exited, P&L realized" },
   ],
   mechanics: [
-    "Orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢ ($100 each)",
+    "Orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢",
     "Wait for fills on both YES and NO, cancel extras",
-    "Loser Exit: Sell when side drops 15% from fill price",
-    "Winner Exit: Sell when side gains 20% from fill price",
+    "Loser Exit: Sell when side drops 10% from fill price",
+    "Winner Exit: Sell when side gains 30% from fill price",
     "MAKER = NO FEES (0.25% rebate!)",
   ],
 }
@@ -118,8 +118,18 @@ export function StrategyRecap({ sessions, strategyMode }: StrategyRecapProps) {
     activeSessions: TradingSession[],
     showDetails: boolean
   ) => {
-    const colorClass = config.color === "emerald" ? "text-emerald-400" : "text-purple-400"
-    const bgClass = config.color === "emerald" ? "bg-emerald-500/10 border-emerald-500/30" : "bg-purple-500/10 border-purple-500/30"
+    const colorClasses: Record<string, string> = {
+      emerald: "text-emerald-400",
+      purple: "text-purple-400",
+      orange: "text-orange-400",
+    }
+    const bgClasses: Record<string, string> = {
+      emerald: "bg-emerald-500/10 border-emerald-500/30",
+      purple: "bg-purple-500/10 border-purple-500/30",
+      orange: "bg-orange-500/10 border-orange-500/30",
+    }
+    const colorClass = colorClasses[config.color] || "text-zinc-400"
+    const bgClass = bgClasses[config.color] || "bg-zinc-500/10 border-zinc-500/30"
 
     return (
       <div className={`p-3 rounded-lg border ${bgClass}`}>
@@ -179,7 +189,7 @@ export function StrategyRecap({ sessions, strategyMode }: StrategyRecapProps) {
     )
   }
 
-  // In compare mode, show both strategies side by side
+  // In compare mode, show all strategies side by side
   if (strategyMode === "compare") {
     return (
       <Card>

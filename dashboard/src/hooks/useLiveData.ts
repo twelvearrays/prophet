@@ -11,6 +11,8 @@ import {
   checkForceExit,
   executeForceExit,
   calculateDualPnl,
+  checkIncompleteFillTimeout,
+  executeIncompleteFillAbort,
 } from "@/strategies/dualEntry"
 import { logAudit } from "@/lib/auditLog"
 import { tradingApi } from "@/lib/tradingApi"
@@ -73,6 +75,13 @@ const CONFIG = {
   // Liquidity requirements
   minLiquidityForEntry: 50, // Minimum $ liquidity to enter
   minLiquidityForHedge: 100, // Higher requirement for hedge (we NEED this to execute)
+  // === NEW: TIME GATE (Fix #2) ===
+  // Don't enter with less than 7 minutes remaining - late entries have no recovery time
+  minTimeForEntryMinutes: 7, // Skip entries if <7 min left
+  // === NEW: CHASE FILTER (Fix #3) ===
+  // If price is >10¢ above threshold, reduce position size to avoid chasing spikes
+  chaseFilterThreshold: 0.10, // If price > entryThreshold + 10¢, reduce size
+  chaseFilterSizeMultiplier: 0.5, // Reduce to 50% of normal position when chasing
 }
 
 // Backend URLs
@@ -142,9 +151,47 @@ export function getStrategyMode(): StrategyMode {
 // This is set by the hook and used to initialize sessions with existing history
 let globalPriceHistoryRef: Map<string, PriceTick[]> | null = null
 
+// === RE-ENTRY BUG FIX ===
+// Track recently traded markets for DUAL_ENTRY to prevent re-entry
+// Key: marketId (conditionId), Value: timestamp when entry was made
+// Analysis showed DUAL_ENTRY was entering same market multiple times in rapid succession
+const recentDualEntryMarkets: Map<string, number> = new Map()
+const DUAL_ENTRY_COOLDOWN_MS = 20 * 60 * 1000 // 20 minute cooldown (covers full session + buffer)
+
+function canEnterDualEntry(marketId: string): boolean {
+  const lastEntry = recentDualEntryMarkets.get(marketId)
+  if (!lastEntry) return true
+
+  const elapsed = Date.now() - lastEntry
+  if (elapsed >= DUAL_ENTRY_COOLDOWN_MS) {
+    recentDualEntryMarkets.delete(marketId) // Clean up old entry
+    return true
+  }
+
+  return false
+}
+
+function recordDualEntry(marketId: string): void {
+  recentDualEntryMarkets.set(marketId, Date.now())
+
+  // Periodically clean up old entries (keep map from growing unbounded)
+  if (recentDualEntryMarkets.size > 100) {
+    const now = Date.now()
+    for (const [id, timestamp] of recentDualEntryMarkets.entries()) {
+      if (now - timestamp >= DUAL_ENTRY_COOLDOWN_MS) {
+        recentDualEntryMarkets.delete(id)
+      }
+    }
+  }
+}
+
 // Create a session for a specific strategy
 function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType): TradingSession {
-  const suffix = strategy === 'DUAL_ENTRY' ? '-dual' : '-mom'
+  const suffixMap: Record<StrategyType, string> = {
+    'MOMENTUM': '-mom',
+    'DUAL_ENTRY': '-dual',
+  }
+  const suffix = suffixMap[strategy]
   // Use existing price history if available (important for session recreation)
   const existingHistory = globalPriceHistoryRef?.get(market.conditionId) || []
   const lastTick = existingHistory.length > 0 ? existingHistory[existingHistory.length - 1] : null
@@ -177,6 +224,7 @@ function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType):
     currentAssetPrice: null,
     slug: market.slug || null,
     strategyType: strategy,
+    // Dual-Entry state
     dualEntryState: strategy === 'DUAL_ENTRY' ? 'WAITING' : undefined,
     dualPosition: null,
     dualTrade: null,
@@ -227,6 +275,14 @@ export function useLiveData() {
     activeSessions: 0,
     connected: false,
   })
+  
+  // Persisted daily stats from database (survives restarts)
+  const [persistedStats, setPersistedStats] = useState<{
+    todayPnl: number
+    todayWins: number
+    todayLosses: number
+    byStrategy: Record<string, { pnl: number; wins: number; losses: number; sessions: number }>
+  } | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const marketsRef = useRef<Map<string, CryptoMarket>>(new Map())
@@ -239,6 +295,57 @@ export function useLiveData() {
 
   // Link to global ref so createSessionForStrategy can access existing history
   globalPriceHistoryRef = priceHistoryRef.current
+
+  // Fetch persisted daily stats on startup
+  useEffect(() => {
+    const fetchPersistedStats = async () => {
+      try {
+        const res = await fetch(`${API_URL}/audit/daily-stats`)
+        if (res.ok) {
+          const data = await res.json()
+          if (data) {
+            console.log('[STATS] Loaded persisted daily stats:', data.today)
+            setPersistedStats({
+              todayPnl: data.today?.pnl || 0,
+              todayWins: data.today?.wins || 0,
+              todayLosses: data.today?.losses || 0,
+              byStrategy: data.byStrategy || {},
+            })
+          }
+        }
+      } catch (e) {
+        console.error('[STATS] Failed to fetch persisted stats:', e)
+      }
+    }
+    fetchPersistedStats()
+    
+    // Refresh persisted stats every 60 seconds
+    const interval = setInterval(fetchPersistedStats, 60000)
+    return () => clearInterval(interval)
+  }, [])
+
+  // Check trading status on startup (auto-detect if live trading is enabled)
+  useEffect(() => {
+    const checkTradingStatus = async () => {
+      try {
+        const status = await tradingApi.getStatus()
+        if (status.enabled) {
+          console.log('[TRADING] Live trading is ENABLED')
+          console.log('[TRADING] Wallet:', status.address)
+          console.log('[TRADING] Position size: $' + status.config.investmentPerSide)
+        } else {
+          console.log('[TRADING] Paper trading mode (live trading not initialized)')
+        }
+      } catch (e) {
+        console.log('[TRADING] Could not check trading status:', e)
+      }
+    }
+    checkTradingStatus()
+    
+    // Re-check every 30 seconds in case it gets enabled
+    const interval = setInterval(checkTradingStatus, 30000)
+    return () => clearInterval(interval)
+  }, [])
 
   // Check if a pending order should be created based on strategy
   const checkForNewOrder = useCallback(
@@ -283,6 +390,21 @@ export function useLiveData() {
           }
         }
 
+        // === TIME GATE (Fix #2) ===
+        // Don't enter with less than 7 minutes remaining - late entries have no recovery time
+        // Analysis showed hedges in last 2-5 min have avg loss of -$2.58 vs -$0.39 for 10+ min
+        if (remainingMin < CONFIG.minTimeForEntryMinutes) {
+          if (session.priceHistory.length % 20 === 0) {
+            console.log(`[TIME GATE] ${session.asset} | Only ${remainingMin.toFixed(1)}min left (need ${CONFIG.minTimeForEntryMinutes}min) - skipping entry`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SKIP', tick, session.endTime, {
+              action: 'SKIP_ENTRY_TIME_GATE',
+              reason: `Only ${remainingMin.toFixed(1)}min left (need ${CONFIG.minTimeForEntryMinutes}min) - late entries have no recovery time`,
+              thresholds: { minTimeForEntryMinutes: CONFIG.minTimeForEntryMinutes, remainingMin },
+            }, { severity: 'warning' })
+          }
+          return null
+        }
+
         // After max hedges, we CAN still re-enter and scale - we just can't hedge anymore
         // Log that we're at max hedges but still looking
         if (session.hedgedPairs.length >= CONFIG.maxHedges && session.priceHistory.length % 60 === 0) {
@@ -309,10 +431,29 @@ export function useLiveData() {
             }
             return null
           }
-          console.log(`[PENDING] ${session.asset} | YES hit ${(yesPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.yesLiquidity.toFixed(0)})`)
+
+          // === CHASE FILTER (Fix #3) ===
+          // If price is >10¢ above threshold, reduce position size to avoid chasing spikes
+          // Analysis showed entries at 75¢ when threshold is 65¢ = chasing parabolic moves
+          const chaseAmount = yesPrice - CONFIG.entryThreshold
+          const isChasing = chaseAmount > CONFIG.chaseFilterThreshold
+          const positionMultiplier = isChasing ? CONFIG.chaseFilterSizeMultiplier : 1.0
+          const adjustedSize = CONFIG.positionSize * 0.5 * positionMultiplier
+
+          if (isChasing) {
+            console.log(`[CHASE FILTER] ${session.asset} | YES at ${(yesPrice * 100).toFixed(1)}¢ is ${(chaseAmount * 100).toFixed(0)}¢ above threshold - reducing position to ${(positionMultiplier * 100).toFixed(0)}%`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'CHASE_FILTER', tick, session.endTime, {
+              action: 'POSITION_SIZE_REDUCED',
+              reason: `Entry ${(chaseAmount * 100).toFixed(0)}¢ above threshold - chasing spike`,
+              thresholds: { chaseFilterThreshold: CONFIG.chaseFilterThreshold, chaseAmount },
+              calculation: `Position reduced from $${(CONFIG.positionSize * 0.5).toFixed(2)} to $${adjustedSize.toFixed(2)} (${(positionMultiplier * 100).toFixed(0)}%)`,
+            }, { severity: 'warning' })
+          }
+
+          console.log(`[PENDING] ${session.asset} | YES hit ${(yesPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.yesLiquidity.toFixed(0)}${isChasing ? ', SIZE REDUCED' : ''})`)
           logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SIGNAL', tick, session.endTime, {
             action: 'ENTRY_SIGNAL',
-            reason: `YES crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            reason: `YES crossed ${(threshold * 100).toFixed(0)}¢ threshold${isChasing ? ' (chase filter applied)' : ''}`,
             thresholds: { entryThreshold: threshold, maxEntryPrice: CONFIG.maxEntryPrice },
             calculation: `${(yesPrice * 100).toFixed(1)}¢ >= ${(threshold * 100).toFixed(0)}¢ && <= ${(CONFIG.maxEntryPrice * 100).toFixed(0)}¢`,
           }, { severity: 'action' })
@@ -320,8 +461,8 @@ export function useLiveData() {
             type: "ENTER",
             side: "YES",
             triggerPrice: yesPrice,
-            targetShares: (CONFIG.positionSize * 0.5) / yesPrice,
-            reason: `YES crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            targetShares: adjustedSize / yesPrice,
+            reason: `YES crossed ${(threshold * 100).toFixed(0)}¢ threshold${isChasing ? ' (chase filter: 50% size)' : ''}`,
             confirmationTicks: 1,
             createdAt: Date.now(),
           }
@@ -339,10 +480,28 @@ export function useLiveData() {
             }
             return null
           }
-          console.log(`[PENDING] ${session.asset} | NO hit ${(noPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.noLiquidity.toFixed(0)})`)
+
+          // === CHASE FILTER (Fix #3) ===
+          // If price is >10¢ above threshold, reduce position size to avoid chasing spikes
+          const chaseAmountNo = noPrice - CONFIG.entryThreshold
+          const isChasingNo = chaseAmountNo > CONFIG.chaseFilterThreshold
+          const positionMultiplierNo = isChasingNo ? CONFIG.chaseFilterSizeMultiplier : 1.0
+          const adjustedSizeNo = CONFIG.positionSize * 0.5 * positionMultiplierNo
+
+          if (isChasingNo) {
+            console.log(`[CHASE FILTER] ${session.asset} | NO at ${(noPrice * 100).toFixed(1)}¢ is ${(chaseAmountNo * 100).toFixed(0)}¢ above threshold - reducing position to ${(positionMultiplierNo * 100).toFixed(0)}%`)
+            logAudit(session.id, session.asset, 'MOMENTUM', 'CHASE_FILTER', tick, session.endTime, {
+              action: 'POSITION_SIZE_REDUCED',
+              reason: `Entry ${(chaseAmountNo * 100).toFixed(0)}¢ above threshold - chasing spike`,
+              thresholds: { chaseFilterThreshold: CONFIG.chaseFilterThreshold, chaseAmount: chaseAmountNo },
+              calculation: `Position reduced from $${(CONFIG.positionSize * 0.5).toFixed(2)} to $${adjustedSizeNo.toFixed(2)} (${(positionMultiplierNo * 100).toFixed(0)}%)`,
+            }, { severity: 'warning' })
+          }
+
+          console.log(`[PENDING] ${session.asset} | NO hit ${(noPrice * 100).toFixed(1)}¢ - creating pending order (liq: $${tick.noLiquidity.toFixed(0)}${isChasingNo ? ', SIZE REDUCED' : ''})`)
           logAudit(session.id, session.asset, 'MOMENTUM', 'ENTRY_SIGNAL', tick, session.endTime, {
             action: 'ENTRY_SIGNAL',
-            reason: `NO crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            reason: `NO crossed ${(threshold * 100).toFixed(0)}¢ threshold${isChasingNo ? ' (chase filter applied)' : ''}`,
             thresholds: { entryThreshold: threshold, maxEntryPrice: CONFIG.maxEntryPrice },
             calculation: `${(noPrice * 100).toFixed(1)}¢ >= ${(threshold * 100).toFixed(0)}¢ && <= ${(CONFIG.maxEntryPrice * 100).toFixed(0)}¢`,
           }, { severity: 'action' })
@@ -350,8 +509,8 @@ export function useLiveData() {
             type: "ENTER",
             side: "NO",
             triggerPrice: noPrice,
-            targetShares: (CONFIG.positionSize * 0.5) / noPrice,
-            reason: `NO crossed ${(threshold * 100).toFixed(0)}¢ threshold`,
+            targetShares: adjustedSizeNo / noPrice,
+            reason: `NO crossed ${(threshold * 100).toFixed(0)}¢ threshold${isChasingNo ? ' (chase filter: 50% size)' : ''}`,
             confirmationTicks: 1,
             createdAt: Date.now(),
           }
@@ -675,6 +834,7 @@ export function useLiveData() {
       }
 
       // Log execution to audit log (only for valid execution types)
+      // NOTE: We log AFTER the action modifies the session so we have correct P&L
       const tick = session.currentTick
       const executionEventMap: Record<string, 'ENTER_EXECUTED' | 'SCALE_EXECUTED' | 'HEDGE_EXECUTED' | 'CLOSE_EXECUTED' | null> = {
         'ENTER': 'ENTER_EXECUTED',
@@ -685,19 +845,6 @@ export function useLiveData() {
         'NONE': null,
       }
       const executionEvent = executionEventMap[action.type]
-      if (tick && executionEvent) {
-        logAudit(session.id, session.asset, 'MOMENTUM', executionEvent, tick, session.endTime, {
-          action: executionEvent,
-          reason: action.reason,
-          execution: {
-            side: action.side,
-            shares: action.targetShares,
-            triggerPrice: action.targetPrice,
-            fillPrice: executionPrice,
-            slippageBps: CONFIG.slippageBps,
-          },
-        }, { severity: action.type === 'HEDGE' ? 'warning' : 'action' })
-      }
 
       if (action.type === "ENTER") {
         const fill: Fill = {
@@ -780,20 +927,50 @@ export function useLiveData() {
       }
 
       // CLOSE action - Take Profit! Sell entire position
+      let closeProfit = 0
       if (action.type === "CLOSE" && updated.primaryPosition) {
         const pos = updated.primaryPosition
         const sellPrice = executionPrice
         const cost = pos.avgPrice * pos.totalShares
         const revenue = sellPrice * pos.totalShares
-        const profit = revenue - cost
+        closeProfit = revenue - cost
 
         console.log(`[TAKE PROFIT] ${session.asset} | Sold ${pos.totalShares.toFixed(1)} ${pos.side} @ ${(sellPrice * 100).toFixed(1)}¢`)
-        console.log(`[TAKE PROFIT] ${session.asset} | Cost: $${cost.toFixed(2)} | Revenue: $${revenue.toFixed(2)} | Profit: $${profit.toFixed(2)}`)
+        console.log(`[TAKE PROFIT] ${session.asset} | Cost: $${cost.toFixed(2)} | Revenue: $${revenue.toFixed(2)} | Profit: $${closeProfit.toFixed(2)}`)
 
-        updated.realizedPnl += profit
+        updated.realizedPnl += closeProfit
         updated.primaryPosition = null
         updated.entryPrice = null
         updated.state = "CLOSED" // Fully closed - took profit!
+      }
+
+      // NOW log to audit - AFTER all state changes so we have correct P&L
+      if (tick && executionEvent) {
+        // Determine severity and outcome based on action type
+        let severity: 'action' | 'warning' | 'profit' | 'loss' = 'action'
+        let outcome: { fillPrice: number; pnl?: number } | undefined = undefined
+
+        if (action.type === 'HEDGE') {
+          severity = 'warning'
+          // For hedge, the lockedPnl was calculated above
+          const lastHedge = updated.hedgedPairs[updated.hedgedPairs.length - 1]
+          outcome = { fillPrice: executionPrice, pnl: lastHedge?.lockedPnl }
+        } else if (action.type === 'CLOSE') {
+          severity = closeProfit >= 0 ? 'profit' : 'loss'
+          outcome = { fillPrice: executionPrice, pnl: closeProfit }
+        }
+
+        logAudit(session.id, session.asset, 'MOMENTUM', executionEvent, tick, session.endTime, {
+          action: executionEvent,
+          reason: action.reason,
+          execution: {
+            side: action.side,
+            shares: action.targetShares,
+            triggerPrice: action.targetPrice,
+            fillPrice: executionPrice,
+            slippageBps: CONFIG.slippageBps,
+          },
+        }, { severity, outcome })
       }
 
       return updated
@@ -878,37 +1055,64 @@ export function useLiveData() {
       }
 
       if (updated.dualEntryState === 'WAITING') {
-        const entryAction = checkDualEntry(updated, tick)
-        if (entryAction) {
-          updated = executeDualEntry(updated, tick)
-
-          // If live trading is enabled, place real dual-entry maker orders
-          if (tradingApi.isLive) {
-            const market = marketsRef.current.get(session.marketId)
-            if (market) {
-              console.log(`[LIVE TRADE] Placing dual-entry maker orders for ${session.asset}...`)
-              tradingApi.placeDualEntryOrders({
-                yesTokenId: market.yesTokenId,
-                noTokenId: market.noTokenId,
-                marketId: session.marketId,
-              }).then(result => {
-                console.log(`[LIVE TRADE] ✅ Dual-entry orders placed:`, result.orders?.length)
-              }).catch(err => {
-                console.error(`[LIVE TRADE] ❌ Dual-entry orders failed:`, err.message)
-              })
-            }
+        // === RE-ENTRY BUG FIX ===
+        // Check if this market was traded recently (within 20 min cooldown)
+        // Analysis found DUAL_ENTRY entering same market multiple times in rapid succession
+        if (!canEnterDualEntry(updated.marketId)) {
+          // Log periodically to avoid spam
+          if (updated.priceHistory.length % 60 === 0) {
+            console.log(`[DUAL RE-ENTRY BLOCKED] ${updated.asset} | Market traded recently - skipping (20min cooldown)`)
+            logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'ENTRY_SKIP', tick, updated.endTime,
+              { action: 'SKIP_REENTRY', reason: `Market traded within 20min cooldown - preventing duplicate entries` },
+              { severity: 'warning' }
+            )
           }
+        } else {
+          const entryAction = checkDualEntry(updated, tick)
+          if (entryAction) {
+            // Record this market as recently traded BEFORE executing
+            recordDualEntry(updated.marketId)
 
-          // Log maker orders placed
-          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_PLACED', tick, updated.endTime,
-            { action: 'PLACE_MAKER_ORDERS', reason: 'Placing 4 limit orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢' },
-            { severity: 'action' }
-          )
+            updated = executeDualEntry(updated, tick)
+
+            // If live trading is enabled, place real dual-entry maker orders
+            if (tradingApi.isLive) {
+              const market = marketsRef.current.get(session.marketId)
+              if (market) {
+                console.log(`[LIVE TRADE] Placing dual-entry maker orders for ${session.asset}...`)
+                tradingApi.placeDualEntryOrders({
+                  yesTokenId: market.yesTokenId,
+                  noTokenId: market.noTokenId,
+                  marketId: session.marketId,
+                }).then(result => {
+                  console.log(`[LIVE TRADE] ✅ Dual-entry orders placed:`, result.orders?.length)
+                }).catch(err => {
+                  console.error(`[LIVE TRADE] ❌ Dual-entry orders failed:`, err.message)
+                })
+              }
+            }
+
+            // Log maker orders placed
+            logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'MAKER_ORDER_PLACED', tick, updated.endTime,
+              { action: 'PLACE_MAKER_ORDERS', reason: 'Placing 4 limit orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢' },
+              { severity: 'action' }
+            )
+          }
         }
       }
 
       // Process maker order fills when in ENTERING state
       if (updated.dualEntryState === 'ENTERING') {
+        // BUG FIX #2: Check for incomplete fill timeout (one side filled, other didn't)
+        if (checkIncompleteFillTimeout(updated)) {
+          updated = executeIncompleteFillAbort(updated, tick)
+          logAudit(updated.id, updated.asset, 'DUAL_ENTRY', 'INCOMPLETE_FILL_ABORT', tick, updated.endTime,
+            { action: 'ABORT_INCOMPLETE', reason: `Timeout waiting for both sides to fill - aborted and sold partial position` },
+            { severity: 'warning', outcome: { pnl: updated.realizedPnl } }
+          )
+          return updated
+        }
+
         const prevState = updated.dualMakerState
         updated = processMakerFills(updated, tick)
 
@@ -1266,17 +1470,19 @@ export function useLiveData() {
           updated = [...updated, ...newSessions]
 
           // IMPORTANT: Ensure every market has BOTH strategy types
-          // Check for markets that only have momentum but not dual-entry
           const marketIds = new Set(updated.map(s => s.marketId))
           for (const marketId of marketIds) {
             const marketSessions = updated.filter(s => s.marketId === marketId)
             const hasMomentum = marketSessions.some(s => s.strategyType === 'MOMENTUM')
             const hasDualEntry = marketSessions.some(s => s.strategyType === 'DUAL_ENTRY')
 
-            if (hasMomentum && !hasDualEntry) {
-              // Missing dual-entry - create it
-              const market = marketsRef.current.get(marketId)
-              if (market) {
+            const market = marketsRef.current.get(marketId)
+            if (market) {
+              if (!hasMomentum) {
+                console.log(`[LIVE] Missing MOMENTUM for ${market.asset}, creating...`)
+                updated.push(createSessionForStrategy(market, 'MOMENTUM'))
+              }
+              if (!hasDualEntry) {
                 console.log(`[LIVE] Missing DUAL_ENTRY for ${market.asset}, creating...`)
                 updated.push(createSessionForStrategy(market, 'DUAL_ENTRY'))
               }
@@ -1664,9 +1870,10 @@ export function useLiveData() {
     }
   }, [processSessionTick])
 
-  // Update stats
+  // Update stats - combines persisted (from DB) + live in-memory sessions
   useEffect(() => {
-    const totalPnl = sessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
+    // In-memory session P&L (current sessions since app started)
+    const livePnl = sessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
     const activeSessions = sessions.filter(s => s.state !== "CLOSED").length
     const totalTrades = sessions.reduce((sum, s) => sum + s.actions.filter(a => a.type !== "NONE").length, 0)
 
@@ -1674,10 +1881,26 @@ export function useLiveData() {
     const closedWithTrades = sessions.filter(s =>
       s.state === "CLOSED" && (s.primaryPosition || s.realizedPnl !== 0 || s.hedgedPairs.length > 0)
     )
-    const wins = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) > 0).length
-    const losses = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) < 0).length
-    const totalCompleted = wins + losses
-    const winRate = totalCompleted > 0 ? Math.round((wins / totalCompleted) * 100) : 50
+    const liveWins = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) > 0).length
+    const liveLosses = closedWithTrades.filter(s => (s.currentPnl + s.realizedPnl) < 0).length
+
+    // Add persisted daily stats (from DB) to get true daily totals
+    // Note: Persisted stats include COMPLETED sessions, so we add them to live unrealized
+    const persistedPnl = persistedStats?.todayPnl || 0
+    const persistedWins = persistedStats?.todayWins || 0
+    const persistedLosses = persistedStats?.todayLosses || 0
+
+    // Total = persisted completed + live (unrealized + realized)
+    // But we need to avoid double-counting: persisted includes all COMPLETED sessions
+    // while live includes current sessions (some of which may be persisted when closed)
+    // For simplicity, we show: persisted (DB) + live unrealized only
+    const totalPnl = persistedPnl + livePnl
+    
+    // Win rate combines persisted + live
+    const totalWins = persistedWins + liveWins
+    const totalLosses = persistedLosses + liveLosses
+    const totalCompleted = totalWins + totalLosses
+    const winRate = totalCompleted > 0 ? Math.round((totalWins / totalCompleted) * 100) : 50
 
     setStats(prev => ({
       ...prev,
@@ -1687,7 +1910,7 @@ export function useLiveData() {
       totalTrades,
       winRate,
     }))
-  }, [sessions])
+  }, [sessions, persistedStats])
 
   const selectedSession = sessions.find(s => s.id === selectedSessionId) || null
 
@@ -1703,27 +1926,31 @@ export function useLiveData() {
     setStrategyMode(enabled ? 'compare' : 'single')
   }, [])
 
-  // Calculate per-strategy P&L for comparison
+  // Calculate per-strategy P&L for comparison (combines persisted + live)
   const strategyStats = useMemo(() => {
     const momentumSessions = sessions.filter(s => s.strategyType === 'MOMENTUM')
     const dualEntrySessions = sessions.filter(s => s.strategyType === 'DUAL_ENTRY')
 
-    const momentumPnl = momentumSessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
-    const dualEntryPnl = dualEntrySessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
+    const liveMomentumPnl = momentumSessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
+    const liveDualEntryPnl = dualEntrySessions.reduce((sum, s) => sum + s.currentPnl + s.realizedPnl, 0)
+
+    // Add persisted stats from database
+    const persistedMomentum = persistedStats?.byStrategy?.['MOMENTUM'] || { pnl: 0, sessions: 0 }
+    const persistedDualEntry = persistedStats?.byStrategy?.['DUAL_ENTRY'] || { pnl: 0, sessions: 0 }
 
     return {
       momentum: {
-        pnl: momentumPnl,
-        sessions: momentumSessions.length,
+        pnl: liveMomentumPnl + persistedMomentum.pnl,
+        sessions: momentumSessions.length + persistedMomentum.sessions,
         activeSessions: momentumSessions.filter(s => s.state !== 'CLOSED').length,
       },
       dualEntry: {
-        pnl: dualEntryPnl,
-        sessions: dualEntrySessions.length,
+        pnl: liveDualEntryPnl + persistedDualEntry.pnl,
+        sessions: dualEntrySessions.length + persistedDualEntry.sessions,
         activeSessions: dualEntrySessions.filter(s => s.state !== 'CLOSED' && s.dualEntryState !== 'CLOSED').length,
       },
     }
-  }, [sessions])
+  }, [sessions, persistedStats])
 
   return {
     sessions,

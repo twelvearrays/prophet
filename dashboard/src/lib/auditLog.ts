@@ -28,6 +28,8 @@ export type AuditEventType =
   | 'MAKER_ORDER_PLACED'
   | 'MAKER_ORDER_FILLED'
   | 'MAKER_ORDER_CANCELLED'
+  | 'INCOMPLETE_FILL_ABORT'  // BUG FIX: Abort when only one side fills
+  | 'CHASE_FILTER'           // NEW: Position size reduced due to chasing spike
   | 'CONFIG_CHANGE'
   | 'ERROR'
   // Order lifecycle events

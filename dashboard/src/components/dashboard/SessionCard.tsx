@@ -22,7 +22,7 @@ const stateConfig: Record<string, { label: string; className: string }> = {
   CLOSED: { label: "Closed", className: "border-rose-500/30 text-rose-400 bg-rose-500/10" },
   // Dual-entry strategy states
   ENTERING: { label: "Entering", className: "border-purple-500/30 text-purple-400 bg-purple-500/10 animate-pulse" },
-  WAITING_LOSER: { label: "Hedged ⚖️", className: "border-purple-500/30 text-purple-400 bg-purple-500/10" },
+  WAITING_LOSER: { label: "Hedged", className: "border-purple-500/30 text-purple-400 bg-purple-500/10" },
   WAITING_WINNER: { label: "Unhedged", className: "border-amber-500/30 text-amber-400 bg-amber-500/10 animate-pulse" },
 }
 
@@ -80,6 +80,7 @@ export function SessionCard({ session, selected, onClick, compact }: SessionCard
     const getStatusMessage = () => {
       if (isDualEntry) {
         if (session.dualEntryState === 'WAITING') return 'Waiting for 50¢ entry'
+        if (session.dualEntryState === 'ENTERING') return 'Maker orders placed...'
         if (session.dualEntryState === 'WAITING_LOSER') return `Hedged, watching for 45¢ loser`
         if (session.dualEntryState === 'WAITING_WINNER') {
           const winnerSide = session.dualTrade?.winnerSide || '?'
@@ -98,23 +99,26 @@ export function SessionCard({ session, selected, onClick, compact }: SessionCard
       }
     }
 
+    // Get border and badge colors based on strategy
+    const getStrategyStyle = () => {
+      if (isDualEntry) return { border: 'border-l-purple-500/50', badge: 'bg-purple-500/20 text-purple-400 border-purple-500/30', label: 'DUAL' }
+      return { border: 'border-l-emerald-500/50', badge: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30', label: 'MOM' }
+    }
+    const stratStyle = getStrategyStyle()
+
     return (
       <Card
         className={`cursor-pointer transition-all hover:border-zinc-700 ${
           selected ? "border-cyan-500/50 ring-1 ring-cyan-500/20" : ""
-        } ${isDualEntry ? "border-l-2 border-l-purple-500/50" : "border-l-2 border-l-emerald-500/50"}`}
+        } border-l-2 ${stratStyle.border}`}
         onClick={onClick}
       >
         <CardContent className="p-2.5 space-y-2">
           {/* Header: Strategy + State + Time */}
           <div className="flex items-center justify-between gap-1">
             <div className="flex items-center gap-1.5">
-              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold ${
-                isDualEntry
-                  ? "bg-purple-500/20 text-purple-400 border border-purple-500/30"
-                  : "bg-emerald-500/20 text-emerald-400 border border-emerald-500/30"
-              }`}>
-                {isDualEntry ? "DUAL" : "MOM"}
+              <span className={`text-[10px] px-1.5 py-0.5 rounded font-bold border ${stratStyle.badge}`}>
+                {stratStyle.label}
               </span>
               <Badge variant="outline" className={`text-[9px] px-1 py-0 ${config.className}`}>
                 {config.label}

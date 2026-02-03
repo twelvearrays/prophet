@@ -1427,6 +1427,12 @@ app.get('/api/audit/stats', (req, res) => {
   res.json(stats);
 });
 
+// Get daily stats (persisted across restarts)
+app.get('/api/audit/daily-stats', (req, res) => {
+  const stats = auditStorage.getDailyStats();
+  res.json(stats);
+});
+
 // Cleanup old data
 app.post('/api/audit/cleanup', (req, res) => {
   const days = parseInt(req.body.days) || 7;

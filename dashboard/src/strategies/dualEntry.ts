@@ -34,20 +34,22 @@ export function getDualEntryPositionSize(): number {
 
 // Dual-Entry Strategy Configuration
 export const DUAL_ENTRY_CONFIG = {
-  // MAKER ORDER STRATEGY - Place limit orders at these prices
-  // We place 4 orders and wait for fills on both sides
-  makerBidPrice: 0.46,        // Bid YES at 46¢, Bid NO at 46¢ (aggressive)
-  makerAskPrice: 0.54,        // Also bid YES at 54¢, NO at 54¢ (less aggressive)
+  // MAKER ORDER STRATEGY - Place limit orders at market + offset
+  // We place 2 orders (1 YES, 1 NO) at current price + 1¢
+  makerBidOffset: 0.01,       // Bid 1¢ above current market price
   get investmentPerSide() { return dualEntryPositionSize }, // Dynamic - configurable via UI
 
   // Exit thresholds - RELATIVE to entry price
-  loserDropPct: 0.15,         // Exit loser when it drops 15% from entry
-  winnerGainPct: 0.20,        // Exit winner when it gains 20% from entry
+  loserDropPct: 0.10,         // Exit loser when it drops 10% from entry (tighter stop)
+  winnerGainPct: 0.30,        // Exit winner when it gains 30% from entry (let winners run)
 
   // Time-based adjustments
   forceExitMinutesLeft: 1,    // Force exit if < 1 min left
   warnMinutesLeft: 3,         // Warn if < 3 min left
   minTimeToEnterMinutes: 2,   // Don't place new orders if < 2 min left (was 5)
+
+  // BUG FIX #2: Timeout for incomplete fills
+  makerFillTimeoutMs: 60000,  // Abort if both sides not filled within 60 seconds
 
   // Maker orders = no fees, no slippage (we set the price)
   slippageBps: 0,             // Makers don't pay slippage
@@ -99,20 +101,17 @@ function applySlippage(price: number, action: 'BUY' | 'SELL'): number {
 }
 
 /**
- * Check if we should enter (buy both sides)
- */
-/**
- * Check if we should place maker orders or if pending orders got filled
+ * Check if we should place maker orders
  *
- * MAKER STRATEGY:
- * 1. Place 4 limit orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢
- * 2. Wait for market to cross our prices (fills)
- * 3. Once we have both YES and NO filled, cancel remaining orders
+ * SIMPLIFIED MAKER STRATEGY:
+ * 1. Only enter when market is undecided (46¢-54¢ range)
+ * 2. Place 2 limit orders: YES @ market+1¢, NO @ market+1¢
+ * 3. Wait for both to fill
  * 4. Move to WAITING_LOSER state
  */
 export function checkDualEntry(
   session: TradingSession,
-  _tick: PriceTick
+  tick: PriceTick
 ): StrategyAction | null {
   // Only process if in WAITING state
   if (session.dualEntryState !== 'WAITING') return null
@@ -121,6 +120,13 @@ export function checkDualEntry(
   const remainingMs = session.endTime - Date.now()
   const remainingMin = remainingMs / 60000
   if (remainingMin < DUAL_ENTRY_CONFIG.minTimeToEnterMinutes) {
+    return null
+  }
+
+  // Only enter when market is undecided (YES or NO between 46¢-54¢)
+  const yesInRange = tick.yesPrice >= 0.46 && tick.yesPrice <= 0.54
+  const noInRange = tick.noPrice >= 0.46 && tick.noPrice <= 0.54
+  if (!yesInRange && !noInRange) {
     return null
   }
 
@@ -133,13 +139,15 @@ export function checkDualEntry(
 
   // If no pending orders, place them
   if (makerState.pendingOrders.length === 0 && !makerState.filledYes && !makerState.filledNo) {
-    console.log(`[DUAL MAKER] ${session.asset} | Placing 4 limit orders...`)
+    const yesBidPrice = tick.yesPrice + DUAL_ENTRY_CONFIG.makerBidOffset
+    const noBidPrice = tick.noPrice + DUAL_ENTRY_CONFIG.makerBidOffset
+    console.log(`[DUAL MAKER] ${session.asset} | Placing 2 limit orders: YES@${(yesBidPrice * 100).toFixed(1)}¢, NO@${(noBidPrice * 100).toFixed(1)}¢`)
     return {
       type: 'ENTER',
       side: 'YES',
-      reason: `Placing maker orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢`,
-      targetPrice: DUAL_ENTRY_CONFIG.makerBidPrice,
-      targetShares: DUAL_ENTRY_CONFIG.investmentPerSide / DUAL_ENTRY_CONFIG.makerBidPrice,
+      reason: `Placing maker orders: YES@${(yesBidPrice * 100).toFixed(1)}¢, NO@${(noBidPrice * 100).toFixed(1)}¢`,
+      targetPrice: yesBidPrice,
+      targetShares: DUAL_ENTRY_CONFIG.investmentPerSide / yesBidPrice,
       timestamp: Date.now(),
     }
   }
@@ -148,17 +156,83 @@ export function checkDualEntry(
 }
 
 /**
+ * BUG FIX #2: Check if we should abort due to incomplete fills (only one side filled)
+ * Returns true if we've timed out waiting for both sides to fill
+ */
+export function checkIncompleteFillTimeout(
+  session: TradingSession
+): boolean {
+  if (session.dualEntryState !== 'ENTERING') return false
+  if (!session.dualMakerState) return false
+
+  const state = session.dualMakerState
+
+  // Only abort if exactly one side filled (not zero, not both)
+  const hasYes = state.filledYes !== null
+  const hasNo = state.filledNo !== null
+  if ((hasYes && hasNo) || (!hasYes && !hasNo)) return false
+
+  // Check timeout from the first fill
+  const firstFillTime = hasYes ? state.filledYes!.placedAt : state.filledNo!.placedAt
+  const elapsed = Date.now() - firstFillTime
+
+  return elapsed >= DUAL_ENTRY_CONFIG.makerFillTimeoutMs
+}
+
+/**
+ * BUG FIX #2: Abort incomplete fill - sell the one side we have and cancel remaining orders
+ */
+export function executeIncompleteFillAbort(
+  session: TradingSession,
+  tick: PriceTick
+): TradingSession {
+  if (!session.dualMakerState) return session
+
+  const state = session.dualMakerState
+  const now = Date.now()
+
+  // Determine which side filled
+  const filledSide = state.filledYes ? 'YES' : 'NO'
+  const filledOrder = state.filledYes || state.filledNo!
+  const currentPrice = filledSide === 'YES' ? tick.yesPrice : tick.noPrice
+  const actualPrice = applySlippage(currentPrice, 'SELL')
+
+  // Sell the position we have
+  const shares = filledOrder.shares
+  const sellReturn = shares * actualPrice
+  const exitFee = calculateFee(shares, actualPrice)
+
+  // Calculate P&L: what we got back minus what we invested
+  const invested = DUAL_ENTRY_CONFIG.investmentPerSide
+  const profit = sellReturn - exitFee - invested
+
+  const abortAction = {
+    type: 'CLOSE' as const,
+    side: filledSide as Side,
+    reason: `Incomplete fill abort: sold ${filledSide} @ ${(actualPrice * 100).toFixed(1)}¢ | P&L: $${profit.toFixed(2)}`,
+    targetPrice: actualPrice,
+    targetShares: shares,
+    timestamp: now,
+    fillPrice: actualPrice,
+  }
+
+  return {
+    ...session,
+    dualEntryState: 'CLOSED',
+    state: 'CLOSED',
+    dualMakerState: null,
+    realizedPnl: profit,
+    currentPnl: profit,
+    lastActionTime: now,
+    actions: [...session.actions, abortAction],
+  }
+}
+
+/**
  * Check if any pending maker orders should fill based on current price
  *
- * PAPER TRADING MODE: Simulates realistic maker order fills.
- *
- * In real trading:
- * - A BID at 46¢ fills when someone SELLS into it (price crosses DOWN through 46¢)
- * - We need to track if price has CROSSED our order level, not just if it's near it
- *
- * For paper trading, we fill when:
- * - Market price is within a small range of our order price (simulating the cross)
- * - Price must be in a reasonable range (35¢-65¢) to avoid filling when market is decided
+ * SIMPLIFIED: We bid 1¢ above market, so we fill when market reaches our bid.
+ * This simulates getting filled as a maker when price moves up to our level.
  */
 export function checkMakerFills(
   session: TradingSession,
@@ -170,24 +244,14 @@ export function checkMakerFills(
   const filled: MakerOrder[] = []
   const stillPending: MakerOrder[] = []
 
-  // Only try to fill when market is undecided (prices near 50%)
-  // If YES is 27¢ or NO is 74¢, the market has already moved - don't fake fill
-  const marketUndecided = tick.yesPrice >= 0.35 && tick.yesPrice <= 0.65
-
-  // Fill tolerance: how close does price need to be to our order?
-  const FILL_TOLERANCE = 0.05 // 5¢ tolerance
-
   for (const order of state.pendingOrders) {
     const marketPrice = order.side === 'YES' ? tick.yesPrice : tick.noPrice
 
-    // Only fill if:
-    // 1. Market is undecided (neither side has run away)
-    // 2. Market price is within tolerance of our order price
-    const priceNearOrder = Math.abs(marketPrice - order.price) <= FILL_TOLERANCE
-    const shouldFill = marketUndecided && priceNearOrder
+    // Fill when market price reaches or exceeds our bid price
+    const shouldFill = marketPrice >= order.price
 
     if (shouldFill) {
-      console.log(`[DUAL MAKER] ${session.asset} | ${order.side} bid FILLED @ ${(order.price * 100).toFixed(0)}¢ (market: ${(marketPrice * 100).toFixed(1)}¢)`)
+      console.log(`[DUAL MAKER] ${session.asset} | ${order.side} bid FILLED @ ${(order.price * 100).toFixed(1)}¢ (market: ${(marketPrice * 100).toFixed(1)}¢)`)
       filled.push({ ...order, status: 'FILLED' })
     } else {
       stillPending.push(order)
@@ -208,10 +272,9 @@ export function checkMakerFills(
     }
   }
 
-  // If we have both sides filled, cancel remaining orders
+  // If we have both sides filled, we're done
   if (newFilledYes && newFilledNo) {
-    console.log(`[DUAL MAKER] ${session.asset} | Both sides filled! Cancelling ${stillPending.length} remaining orders`)
-    stillPending.forEach(o => o.status = 'CANCELLED')
+    console.log(`[DUAL MAKER] ${session.asset} | Both sides filled!`)
   }
 
   return {
@@ -225,49 +288,39 @@ export function checkMakerFills(
 }
 
 /**
- * Execute dual-entry - Place maker limit orders
+ * Execute dual-entry - Place 2 maker limit orders at market + 1¢
  */
 export function executeDualEntry(
   session: TradingSession,
-  _tick: PriceTick
+  tick: PriceTick
 ): TradingSession {
   const now = Date.now()
 
-  // Place 4 maker orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢
+  // Calculate bid prices: current market + 1¢
+  const yesBidPrice = Math.min(0.99, tick.yesPrice + DUAL_ENTRY_CONFIG.makerBidOffset)
+  const noBidPrice = Math.min(0.99, tick.noPrice + DUAL_ENTRY_CONFIG.makerBidOffset)
+
+  // Place 2 maker orders: YES @ market+1¢, NO @ market+1¢
   const pendingOrders: MakerOrder[] = [
     {
       side: 'YES',
-      price: DUAL_ENTRY_CONFIG.makerBidPrice,  // 46¢
-      shares: DUAL_ENTRY_CONFIG.investmentPerSide / DUAL_ENTRY_CONFIG.makerBidPrice,
-      placedAt: now,
-      status: 'PENDING',
-    },
-    {
-      side: 'YES',
-      price: DUAL_ENTRY_CONFIG.makerAskPrice,  // 54¢
-      shares: DUAL_ENTRY_CONFIG.investmentPerSide / DUAL_ENTRY_CONFIG.makerAskPrice,
+      price: yesBidPrice,
+      shares: DUAL_ENTRY_CONFIG.investmentPerSide / yesBidPrice,
       placedAt: now,
       status: 'PENDING',
     },
     {
       side: 'NO',
-      price: DUAL_ENTRY_CONFIG.makerBidPrice,  // 46¢
-      shares: DUAL_ENTRY_CONFIG.investmentPerSide / DUAL_ENTRY_CONFIG.makerBidPrice,
-      placedAt: now,
-      status: 'PENDING',
-    },
-    {
-      side: 'NO',
-      price: DUAL_ENTRY_CONFIG.makerAskPrice,  // 54¢
-      shares: DUAL_ENTRY_CONFIG.investmentPerSide / DUAL_ENTRY_CONFIG.makerAskPrice,
+      price: noBidPrice,
+      shares: DUAL_ENTRY_CONFIG.investmentPerSide / noBidPrice,
       placedAt: now,
       status: 'PENDING',
     },
   ]
 
-  console.log(`[DUAL MAKER] ${session.asset} | Placed 4 limit orders:`)
-  console.log(`  YES bids: 46¢ (${pendingOrders[0].shares.toFixed(0)} shares), 54¢ (${pendingOrders[1].shares.toFixed(0)} shares)`)
-  console.log(`  NO bids:  46¢ (${pendingOrders[2].shares.toFixed(0)} shares), 54¢ (${pendingOrders[3].shares.toFixed(0)} shares)`)
+  console.log(`[DUAL MAKER] ${session.asset} | Placed 2 limit orders:`)
+  console.log(`  YES bid: ${(yesBidPrice * 100).toFixed(1)}¢ (${pendingOrders[0].shares.toFixed(0)} shares)`)
+  console.log(`  NO bid:  ${(noBidPrice * 100).toFixed(1)}¢ (${pendingOrders[1].shares.toFixed(0)} shares)`)
 
   const dualMakerState: DualMakerState = {
     pendingOrders,
@@ -279,8 +332,8 @@ export function executeDualEntry(
   const newAction = {
     type: 'ENTER' as const,
     side: 'YES' as const,
-    reason: `Placed 4 maker orders: YES@46¢, YES@54¢, NO@46¢, NO@54¢`,
-    targetPrice: DUAL_ENTRY_CONFIG.makerBidPrice,
+    reason: `Placed 2 maker orders: YES@${(yesBidPrice * 100).toFixed(1)}¢, NO@${(noBidPrice * 100).toFixed(1)}¢`,
+    targetPrice: yesBidPrice,
     targetShares: pendingOrders[0].shares,
     timestamp: now,
     fillPrice: undefined,
@@ -391,18 +444,22 @@ export function checkLoserExit(
 
   const pos = session.dualPosition
 
+  // BUG FIX #1 (continued): Only check sides where we actually have shares
+  const hasYesShares = pos.yesShares > 0
+  const hasNoShares = pos.noShares > 0
+
   // Calculate loser thresholds RELATIVE to entry prices
   const yesLoserThreshold = pos.yesAvgPrice * (1 - DUAL_ENTRY_CONFIG.loserDropPct)
   const noLoserThreshold = pos.noAvgPrice * (1 - DUAL_ENTRY_CONFIG.loserDropPct)
 
-  // Check if YES hit loser threshold (dropped 15% from entry)
-  if (tick.yesPrice <= yesLoserThreshold) {
+  // Check if YES hit loser threshold (dropped 15% from entry) - only if we have YES shares
+  if (hasYesShares && tick.yesPrice <= yesLoserThreshold) {
     console.log(`[DUAL] ${session.asset} | YES hit loser threshold: ${(tick.yesPrice * 100).toFixed(1)}¢ <= ${(yesLoserThreshold * 100).toFixed(1)}¢ (entry was ${(pos.yesAvgPrice * 100).toFixed(1)}¢)`)
     return { side: 'YES', price: tick.yesPrice }
   }
 
-  // Check if NO hit loser threshold (dropped 15% from entry)
-  if (tick.noPrice <= noLoserThreshold) {
+  // Check if NO hit loser threshold (dropped 15% from entry) - only if we have NO shares
+  if (hasNoShares && tick.noPrice <= noLoserThreshold) {
     console.log(`[DUAL] ${session.asset} | NO hit loser threshold: ${(tick.noPrice * 100).toFixed(1)}¢ <= ${(noLoserThreshold * 100).toFixed(1)}¢ (entry was ${(pos.noAvgPrice * 100).toFixed(1)}¢)`)
     return { side: 'NO', price: tick.noPrice }
   }
@@ -421,8 +478,14 @@ export function executeLoserExit(
   if (!session.dualPosition || !session.dualTrade) return session
 
   const pos = session.dualPosition
-  const actualPrice = applySlippage(exitPrice, 'SELL')
+
+  // BUG FIX #1: Validate we actually have shares to sell before proceeding
   const shares = loserSide === 'YES' ? pos.yesShares : pos.noShares
+  if (shares <= 0) {
+    return session
+  }
+
+  const actualPrice = applySlippage(exitPrice, 'SELL')
   const loserReturn = shares * actualPrice
   const loserExitFee = calculateFee(shares, actualPrice)
 
@@ -688,19 +751,23 @@ export function calculateDualPnl(
   if (session.dualEntryState === 'WAITING_WINNER' && trade) {
     // Loser sold, winner still open
     const winnerSide = trade.winnerSide!
+    const loserSide = trade.loserSide!
     const winnerShares = winnerSide === 'YES' ? pos.yesShares : pos.noShares
     const winnerAvgPrice = winnerSide === 'YES' ? pos.yesAvgPrice : pos.noAvgPrice
     const winnerCurrentPrice = winnerSide === 'YES' ? tick.yesPrice : tick.noPrice
     const winnerValue = winnerShares * winnerCurrentPrice
     const winnerCost = winnerShares * winnerAvgPrice
 
-    // Already realized from loser
-    const loserPnl = (trade.loserReturn || 0) - (DUAL_ENTRY_CONFIG.investmentPerSide) - pos.yesEntryFee
+    // BUG FIX #3: Use correct side's entry fee based on loserSide
+    const loserEntryFee = loserSide === 'YES' ? pos.yesEntryFee : pos.noEntryFee
 
-    // Unrealized from winner
+    // Already realized from loser: return - investment - entry fee - exit fee
+    const loserPnl = (trade.loserReturn || 0) - DUAL_ENTRY_CONFIG.investmentPerSide - loserEntryFee - (trade.loserExitFee || 0)
+
+    // Unrealized from winner (entry fee not yet deducted, will be at exit)
     const winnerUnrealized = winnerValue - winnerCost
 
-    return loserPnl + winnerUnrealized - (trade.loserExitFee || 0)
+    return loserPnl + winnerUnrealized
   }
 
   return session.realizedPnl

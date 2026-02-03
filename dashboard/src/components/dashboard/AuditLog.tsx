@@ -28,6 +28,8 @@ const EVENT_CONFIG: Record<AuditEventType, { icon: string; color: string; label:
   MAKER_ORDER_PLACED: { icon: '📝', color: 'text-purple-400', label: 'ORDER' },
   MAKER_ORDER_FILLED: { icon: '✅', color: 'text-purple-400', label: 'FILL' },
   MAKER_ORDER_CANCELLED: { icon: '❌', color: 'text-zinc-400', label: 'CANCEL' },
+  INCOMPLETE_FILL_ABORT: { icon: '⚠️', color: 'text-amber-500', label: 'ABORT' },
+  CHASE_FILTER: { icon: '🐢', color: 'text-amber-400', label: 'CHASE' },
   CONFIG_CHANGE: { icon: '⚙️', color: 'text-zinc-400', label: 'CONFIG' },
   ERROR: { icon: '🚨', color: 'text-rose-500', label: 'ERROR' },
   // Order lifecycle events

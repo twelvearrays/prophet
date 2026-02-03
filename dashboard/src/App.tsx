@@ -48,7 +48,7 @@ function App() {
     loadDefault()
   }, [])
 
-  // Update both momentum and dual-entry configs when position size changes
+  // Update all strategy configs when position size changes
   const handlePositionSizeChange = useCallback((size: number) => {
     setPositionSizeState(size)
     setPositionSize(size)

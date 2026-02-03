@@ -240,9 +240,16 @@ function upsertSession(params) {
     db.run(`UPDATE sessions SET hedge_count = hedge_count + 1, updated_at = ? WHERE session_id = ?`,
       [now, params.sessionId]);
   }
-  if (['TAKE_PROFIT', 'LOSER_EXIT', 'WINNER_EXIT', 'FORCE_EXIT'].includes(eventType)) {
-    db.run(`UPDATE sessions SET total_exits = total_exits + 1, updated_at = ? WHERE session_id = ?`,
-      [now, params.sessionId]);
+  // Exit events that should update P&L and exit count
+  // Includes both dual-entry events (LOSER_EXIT, WINNER_EXIT, FORCE_EXIT)
+  // and momentum events (TAKE_PROFIT, CLOSE_EXECUTED, HEDGE_EXECUTED)
+  const exitEvents = ['TAKE_PROFIT', 'LOSER_EXIT', 'WINNER_EXIT', 'FORCE_EXIT', 'CLOSE_EXECUTED', 'HEDGE_EXECUTED'];
+  if (exitEvents.includes(eventType)) {
+    // Don't count HEDGE_EXECUTED as an "exit" since momentum can re-enter
+    if (eventType !== 'HEDGE_EXECUTED') {
+      db.run(`UPDATE sessions SET total_exits = total_exits + 1, updated_at = ? WHERE session_id = ?`,
+        [now, params.sessionId]);
+    }
 
     if (params.outcome?.pnl !== undefined) {
       const pnl = params.outcome.pnl;
@@ -456,6 +463,78 @@ export function getStats() {
 }
 
 /**
+ * Get daily stats from database (persisted across restarts)
+ */
+export function getDailyStats() {
+  if (!db) return null;
+
+  // Get today's start timestamp (midnight local time)
+  const now = new Date();
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+
+  // All-time stats
+  const allTimeResult = db.exec(`
+    SELECT 
+      SUM(final_pnl) as total_pnl,
+      SUM(winning_trades) as wins,
+      SUM(losing_trades) as losses
+    FROM sessions
+  `);
+
+  // Today's stats
+  const todayResult = db.exec(`
+    SELECT 
+      SUM(final_pnl) as total_pnl,
+      SUM(winning_trades) as wins,
+      SUM(losing_trades) as losses
+    FROM sessions 
+    WHERE start_time >= ?
+  `, [todayStart]);
+
+  // Per-strategy breakdown for today
+  const strategyResult = db.exec(`
+    SELECT 
+      strategy,
+      SUM(final_pnl) as total_pnl,
+      SUM(winning_trades) as wins,
+      SUM(losing_trades) as losses,
+      COUNT(*) as sessions
+    FROM sessions 
+    WHERE start_time >= ?
+    GROUP BY strategy
+  `, [todayStart]);
+
+  const allTime = allTimeResult[0]?.values[0] || [0, 0, 0];
+  const today = todayResult[0]?.values[0] || [0, 0, 0];
+  const strategies = resultToObjects(strategyResult);
+
+  const strategyStats = {};
+  for (const s of strategies) {
+    strategyStats[s.strategy] = {
+      pnl: s.total_pnl || 0,
+      wins: s.wins || 0,
+      losses: s.losses || 0,
+      sessions: s.sessions || 0,
+    };
+  }
+
+  return {
+    allTime: {
+      pnl: allTime[0] || 0,
+      wins: allTime[1] || 0,
+      losses: allTime[2] || 0,
+    },
+    today: {
+      pnl: today[0] || 0,
+      wins: today[1] || 0,
+      losses: today[2] || 0,
+    },
+    byStrategy: strategyStats,
+    todayStart,
+  };
+}
+
+/**
  * Clear old data (keep last N days)
  */
 export function cleanup(daysToKeep = 7) {
@@ -496,5 +575,6 @@ export default {
   exportSessionToMarkdown,
   saveAiAnalysis,
   getStats,
+  getDailyStats,
   cleanup,
 };
