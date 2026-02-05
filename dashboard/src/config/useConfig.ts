@@ -11,6 +11,7 @@ import {
   DEFAULT_CONFIG,
   MomentumConfig,
   DualEntryConfig,
+  ArbitrageConfig,
   SystemConfig,
 } from './strategyConfig'
 
@@ -94,6 +95,22 @@ export function useConfig() {
     })
   }, [])
 
+  // Update a single arbitrage config value
+  const updateArbitrage = useCallback(<K extends keyof ArbitrageConfig>(
+    key: K,
+    value: ArbitrageConfig[K]
+  ) => {
+    setConfigState(prev => {
+      const newConfig = {
+        ...prev,
+        arbitrage: { ...prev.arbitrage, [key]: value }
+      }
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig))
+      setLastSaved(new Date())
+      return newConfig
+    })
+  }, [])
+
   // Update a single system config value
   const updateSystem = useCallback(<K extends keyof SystemConfig>(
     key: K,
@@ -157,6 +174,7 @@ export function useConfig() {
     lastSaved,
     updateMomentum,
     updateDualEntry,
+    updateArbitrage,
     updateSystem,
     resetToDefaults,
     syncToBackend,
@@ -177,6 +195,10 @@ export function getMomentumConfig(): MomentumConfig {
 
 export function getDualEntryConfig(): DualEntryConfig {
   return currentConfig.dualEntry
+}
+
+export function getArbitrageConfig(): ArbitrageConfig {
+  return currentConfig.arbitrage
 }
 
 export function getSystemConfig(): SystemConfig {

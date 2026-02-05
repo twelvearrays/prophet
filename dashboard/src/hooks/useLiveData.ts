@@ -190,6 +190,7 @@ function createSessionForStrategy(market: CryptoMarket, strategy: StrategyType):
   const suffixMap: Record<StrategyType, string> = {
     'MOMENTUM': '-mom',
     'DUAL_ENTRY': '-dual',
+    'ARBITRAGE': '-arb',
   }
   const suffix = suffixMap[strategy]
   // Use existing price history if available (important for session recreation)

@@ -67,7 +67,7 @@ class LiveRunner {
 
       // Filter by symbols we care about
       const relevantMarkets = markets.filter(m =>
-        this.config.symbols.includes(m.symbol)
+        this.config.symbols.includes(m.asset)
       );
 
       console.log(`   Found ${relevantMarkets.length} relevant markets`);
@@ -157,7 +157,7 @@ class LiveRunner {
   private handleEvent(event: StrategyEvent, market: CryptoMarket): void {
     switch (event.type) {
       case 'SESSION_START':
-        console.log(`   ▶️ Session started for ${market.symbol}`);
+        console.log(`   ▶️ Session started for ${market.asset}`);
         break;
 
       case 'ACTION_TAKEN':

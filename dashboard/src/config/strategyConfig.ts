@@ -75,6 +75,24 @@ export interface DualEntryConfig {
   feeExponent: number
 }
 
+// Arbitrage Strategy Configuration (Frank-Wolfe Algorithm)
+export interface ArbitrageConfig {
+  // Alpha-extraction threshold
+  alpha: number                     // Fraction of arbitrage to capture (e.g., 0.9 = 90%)
+  minDivergence: number             // Minimum Bregman divergence to trade (e.g., 0.025 = 2.5%)
+
+  // Algorithm parameters
+  maxIterations: number             // Max Frank-Wolfe iterations
+  tolerance: number                 // Convergence tolerance
+  solverTimeout: number             // IP solver timeout in seconds
+
+  // Trading parameters
+  minProfitAfterCosts: number       // Minimum profit after execution costs
+  executionCost: number             // Estimated execution cost as fraction
+  liquidityParam: number            // LMSR liquidity parameter (b)
+  positionSize: number              // $ per arbitrage trade
+}
+
 // System Configuration
 export interface SystemConfig {
   autoRestartOnNewMarket: boolean  // Auto-restart sessions when new market window starts
@@ -86,6 +104,7 @@ export interface SystemConfig {
 export interface StrategyConfigState {
   momentum: MomentumConfig
   dualEntry: DualEntryConfig
+  arbitrage: ArbitrageConfig
   system: SystemConfig
 }
 
@@ -143,6 +162,18 @@ export const DEFAULT_DUAL_ENTRY_CONFIG: DualEntryConfig = {
   feeExponent: 2,
 }
 
+export const DEFAULT_ARBITRAGE_CONFIG: ArbitrageConfig = {
+  alpha: 0.9,                    // Capture 90% of arbitrage
+  minDivergence: 0.025,          // 2.5% minimum mispricing
+  maxIterations: 100,            // Max Frank-Wolfe iterations
+  tolerance: 1e-6,               // Convergence tolerance
+  solverTimeout: 10,             // 10 second solver timeout
+  minProfitAfterCosts: 0.01,     // 1% minimum profit after costs
+  executionCost: 0.02,           // 2% estimated execution cost
+  liquidityParam: 100,           // LMSR b parameter
+  positionSize: 50,              // $50 per arbitrage trade
+}
+
 export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
   autoRestartOnNewMarket: false,
   paperTrading: true,
@@ -152,6 +183,7 @@ export const DEFAULT_SYSTEM_CONFIG: SystemConfig = {
 export const DEFAULT_CONFIG: StrategyConfigState = {
   momentum: DEFAULT_MOMENTUM_CONFIG,
   dualEntry: DEFAULT_DUAL_ENTRY_CONFIG,
+  arbitrage: DEFAULT_ARBITRAGE_CONFIG,
   system: DEFAULT_SYSTEM_CONFIG,
 }
 
@@ -175,6 +207,15 @@ export const CONFIG_LABELS: Record<string, { label: string; description: string;
   'dualEntry.investmentPerSide': { label: 'Investment Per Side', description: 'Dollar amount per side', unit: '$', min: 10, max: 500, step: 10 },
   'dualEntry.loserDropPct': { label: 'Loser Exit %', description: 'Sell loser at this % drop', unit: '%', min: 0.05, max: 0.30, step: 0.01 },
   'dualEntry.winnerGainPct': { label: 'Winner Exit %', description: 'Sell winner at this % gain', unit: '%', min: 0.10, max: 0.50, step: 0.01 },
+
+  // Arbitrage (Frank-Wolfe)
+  'arbitrage.alpha': { label: 'Alpha Extraction', description: 'Fraction of arbitrage to capture', unit: '%', min: 0.7, max: 0.99, step: 0.01 },
+  'arbitrage.minDivergence': { label: 'Min Divergence', description: 'Minimum mispricing to trade', unit: '%', min: 0.01, max: 0.10, step: 0.005 },
+  'arbitrage.maxIterations': { label: 'Max Iterations', description: 'Frank-Wolfe iteration limit', min: 10, max: 500, step: 10 },
+  'arbitrage.minProfitAfterCosts': { label: 'Min Profit', description: 'Minimum profit after costs', unit: '%', min: 0.005, max: 0.05, step: 0.005 },
+  'arbitrage.executionCost': { label: 'Execution Cost', description: 'Estimated execution cost', unit: '%', min: 0.01, max: 0.05, step: 0.005 },
+  'arbitrage.liquidityParam': { label: 'LMSR Liquidity (b)', description: 'Market maker liquidity parameter', min: 10, max: 500, step: 10 },
+  'arbitrage.positionSize': { label: 'Position Size', description: 'Dollar amount per arbitrage', unit: '$', min: 10, max: 500, step: 10 },
 
   // System
   'system.autoRestartOnNewMarket': { label: 'Auto-Restart', description: 'Restart sessions on new market window' },

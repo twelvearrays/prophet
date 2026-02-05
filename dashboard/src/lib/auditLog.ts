@@ -49,7 +49,7 @@ export interface AuditLogEntry {
   timestamp: number
   sessionId: string
   asset: string
-  strategy: 'MOMENTUM' | 'DUAL_ENTRY'
+  strategy: 'MOMENTUM' | 'DUAL_ENTRY' | 'ARBITRAGE'
   eventType: AuditEventType
   severity: AuditSeverity
 
@@ -115,7 +115,7 @@ export interface AuditLogEntry {
 export interface SessionAudit {
   sessionId: string
   asset: string
-  strategy: 'MOMENTUM' | 'DUAL_ENTRY'
+  strategy: 'MOMENTUM' | 'DUAL_ENTRY' | 'ARBITRAGE'
   marketId: string
   startTime: number
   endTime: number
@@ -227,7 +227,7 @@ class AuditLogManager {
   log(params: {
     sessionId: string
     asset: string
-    strategy: 'MOMENTUM' | 'DUAL_ENTRY'
+    strategy: 'MOMENTUM' | 'DUAL_ENTRY' | 'ARBITRAGE'
     eventType: AuditEventType
     severity?: AuditSeverity
     yesPrice: number
@@ -460,7 +460,7 @@ export const auditLog = new AuditLogManager()
 export function logAudit(
   sessionId: string,
   asset: string,
-  strategy: 'MOMENTUM' | 'DUAL_ENTRY',
+  strategy: 'MOMENTUM' | 'DUAL_ENTRY' | 'ARBITRAGE',
   eventType: AuditEventType,
   tick: { yesPrice: number; noPrice: number; yesLiquidity?: number; noLiquidity?: number },
   endTime: number,

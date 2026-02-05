@@ -95,7 +95,7 @@ function ConfigToggle({ configKey, value, onChange, disabled }: ConfigToggleProp
   )
 }
 
-type TabType = 'momentum' | 'dualEntry' | 'system' | 'presets'
+type TabType = 'momentum' | 'dualEntry' | 'arbitrage' | 'system' | 'presets'
 
 interface ConfigPanelProps {
   positionSize?: number
@@ -121,6 +121,7 @@ export function ConfigPanel({
     lastSaved,
     updateMomentum,
     updateDualEntry,
+    updateArbitrage,
     updateSystem,
     resetToDefaults,
     syncToBackend,
@@ -298,6 +299,7 @@ export function ConfigPanel({
           {[
             { key: 'momentum', label: '🚀 Momentum' },
             { key: 'dualEntry', label: '⚖️ Dual-Entry' },
+            { key: 'arbitrage', label: '🔀 Arbitrage' },
             { key: 'system', label: '⚙️ System' },
             { key: 'presets', label: '💾 Presets' },
           ].map(tab => (
@@ -509,6 +511,63 @@ export function ConfigPanel({
                 configKey="dualEntry.winnerGainPct"
                 value={config.dualEntry.winnerGainPct}
                 onChange={(v) => updateDualEntry('winnerGainPct', v)}
+              />
+            </div>
+          </>
+        )}
+
+        {activeTab === 'arbitrage' && (
+          <>
+            <div className="p-3 rounded-lg bg-amber-500/10 border border-amber-500/30 mb-4">
+              <p className="text-sm font-medium text-amber-400">🔬 Frank-Wolfe Arbitrage Strategy</p>
+              <p className="text-xs text-zinc-400 mt-1">
+                Detects and exploits cross-market mispricing using Bregman projection.
+                Based on Kroer et al. 2016 (arXiv:1606.02825).
+              </p>
+            </div>
+
+            <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Alpha Extraction</div>
+            <ConfigSlider
+              configKey="arbitrage.alpha"
+              value={config.arbitrage.alpha}
+              onChange={(v) => updateArbitrage('alpha', v)}
+            />
+            <ConfigSlider
+              configKey="arbitrage.minDivergence"
+              value={config.arbitrage.minDivergence}
+              onChange={(v) => updateArbitrage('minDivergence', v)}
+            />
+
+            <div className="border-t border-zinc-800 pt-4 mt-4">
+              <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Algorithm Parameters</div>
+              <ConfigSlider
+                configKey="arbitrage.maxIterations"
+                value={config.arbitrage.maxIterations}
+                onChange={(v) => updateArbitrage('maxIterations', v)}
+              />
+              <ConfigSlider
+                configKey="arbitrage.liquidityParam"
+                value={config.arbitrage.liquidityParam}
+                onChange={(v) => updateArbitrage('liquidityParam', v)}
+              />
+            </div>
+
+            <div className="border-t border-zinc-800 pt-4 mt-4">
+              <div className="text-xs text-zinc-500 uppercase tracking-wider mb-3">Trading Parameters</div>
+              <ConfigSlider
+                configKey="arbitrage.positionSize"
+                value={config.arbitrage.positionSize}
+                onChange={(v) => updateArbitrage('positionSize', v)}
+              />
+              <ConfigSlider
+                configKey="arbitrage.minProfitAfterCosts"
+                value={config.arbitrage.minProfitAfterCosts}
+                onChange={(v) => updateArbitrage('minProfitAfterCosts', v)}
+              />
+              <ConfigSlider
+                configKey="arbitrage.executionCost"
+                value={config.arbitrage.executionCost}
+                onChange={(v) => updateArbitrage('executionCost', v)}
               />
             </div>
           </>

@@ -4,7 +4,24 @@ export type Side = 'YES' | 'NO'
 export type SessionState = 'WAITING' | 'ENTRY' | 'SCALING' | 'HEDGED' | 'CLOSED'
 
 // Strategy types
-export type StrategyType = 'MOMENTUM' | 'DUAL_ENTRY'
+export type StrategyType = 'MOMENTUM' | 'DUAL_ENTRY' | 'ARBITRAGE'
+
+// Arbitrage-specific states (Frank-Wolfe algorithm)
+export type ArbitrageState =
+  | 'SCANNING'           // Looking for arbitrage opportunities
+  | 'OPPORTUNITY_FOUND'  // Arbitrage detected, evaluating
+  | 'EXECUTING'          // Executing arbitrage trades
+  | 'COMPLETED'          // Arbitrage cycle completed
+  | 'CLOSED'             // Session ended
+
+// Arbitrage opportunity details
+export interface ArbitrageOpportunityInfo {
+  divergence: number          // Bregman divergence (mispricing measure)
+  gap: number                 // Frank-Wolfe gap
+  guaranteedProfit: number    // Lower bound profit guarantee
+  shouldTrade: boolean        // Trade recommendation
+  reason: string              // Decision explanation
+}
 
 // Dual-Entry specific states
 export type DualEntryState =
