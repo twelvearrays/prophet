@@ -7,10 +7,13 @@ import { ConfigPanel } from "@/components/dashboard/ConfigPanel"
 import { AuditLog } from "@/components/dashboard/AuditLog"
 import { AIReviewPrompt } from "@/components/dashboard/AIReviewPrompt"
 import { LiveTradingPanel } from "@/components/dashboard/LiveTradingPanel"
+import { ArbitrageMonitor } from "@/components/dashboard/ArbitrageMonitor"
+import { CrossMarketMonitor } from "@/components/dashboard/CrossMarketMonitor"
 import { useSimulation } from "@/hooks/useSimulation"
 import { useLiveData, setPositionSize, setSelectedAssets, setMomentumWarmup } from "@/hooks/useLiveData"
 import { setDualEntryPositionSize } from "@/strategies/dualEntry"
 import { getDefaultPreset, type MomentumConfig } from "@/lib/configStorage"
+import { getArbitrageConfig } from "@/config/useConfig"
 
 type Asset = 'BTC' | 'ETH' | 'SOL' | 'XRP'
 
@@ -18,6 +21,7 @@ function App() {
   const [mode, setMode] = useState<"simulation" | "live">("live")
   const [showConfig, setShowConfig] = useState(false)
   const [showAuditLog, setShowAuditLog] = useState(false)
+  const [showArbitrage, setShowArbitrage] = useState(false)
   const [isLiveTrading, setIsLiveTrading] = useState(false)
   const [positionSize, setPositionSizeState] = useState(1) // Default $1
   const [selectedAssetsState, setSelectedAssetsState] = useState<Asset[]>(['BTC']) // Default BTC only
@@ -178,6 +182,16 @@ function App() {
               </span>
             )}
             <button
+              onClick={() => setShowArbitrage(!showArbitrage)}
+              className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${
+                showArbitrage
+                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
+                  : "bg-zinc-800 text-zinc-400 hover:text-zinc-300 border border-zinc-700"
+              }`}
+            >
+              🔀 Arbitrage
+            </button>
+            <button
               onClick={() => setShowAuditLog(!showAuditLog)}
               className={`px-3 py-1.5 text-sm font-medium rounded-md transition-colors flex items-center gap-1.5 ${
                 showAuditLog
@@ -233,6 +247,98 @@ function App() {
                 selectedAssets={selectedAssetsState}
                 onAssetsChange={handleAssetsChange}
               />
+            </div>
+          </div>
+        )}
+
+        {/* Arbitrage Monitor Panel (Collapsible) */}
+        {showArbitrage && (
+          <div className="mb-4 space-y-4">
+            {/* Type 1: Multi-Outcome Arbitrage */}
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-5">
+                <ArbitrageMonitor
+                  config={getArbitrageConfig()}
+                  onOpportunityDetected={(opp) => {
+                    console.log('[ARBITRAGE] Opportunity detected:', opp)
+                  }}
+                />
+              </div>
+              <div className="col-span-7">
+                <div className="p-4 rounded-lg border border-zinc-700 bg-zinc-900/50 h-full">
+                  <h3 className="text-sm font-medium text-zinc-400 mb-3">
+                    <span className="text-emerald-400">Type 1:</span> Multi-Outcome Arbitrage (Frank-Wolfe)
+                  </h3>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div className="p-3 rounded bg-zinc-800/50 border border-zinc-700/50">
+                      <div className="text-xs text-amber-400 mb-2 font-medium">💰 The Opportunity</div>
+                      <div className="space-y-2 text-xs text-zinc-400">
+                        <p>In multi-outcome events, all outcome probabilities must sum to 1.00</p>
+                        <div className="p-2 bg-zinc-900 rounded mt-2">
+                          <div className="text-emerald-400 font-mono">If Σ(outcomes) {"<"} 1.00:</div>
+                          <div className="text-zinc-500 ml-2">→ BUY ALL outcomes</div>
+                          <div className="text-zinc-600 text-[10px] ml-2">One will win = guaranteed $1 payout</div>
+                        </div>
+                        <div className="p-2 bg-zinc-900 rounded">
+                          <div className="text-red-400 font-mono">If Σ(outcomes) {">"} 1.00:</div>
+                          <div className="text-zinc-500 ml-2">→ SELL ALL outcomes</div>
+                          <div className="text-zinc-600 text-[10px] ml-2">Only pay out $1 max, keep excess</div>
+                        </div>
+                      </div>
+                    </div>
+                    <div className="p-3 rounded bg-zinc-800/50 border border-zinc-700/50">
+                      <div className="text-xs text-cyan-400 mb-2 font-medium">📊 NegRisk Markets</div>
+                      <div className="space-y-2 text-xs text-zinc-400">
+                        <p>Polymarket uses NegRisk for multi-outcome events:</p>
+                        <p>• "Who will win the election?" (5+ candidates)</p>
+                        <p>• "Which team wins the championship?"</p>
+                        <p>• "What price will BTC reach?"</p>
+                        <div className="mt-2 p-2 bg-emerald-500/10 border border-emerald-500/20 rounded">
+                          <div className="text-emerald-400 text-[10px]">More outcomes = more fee drag</div>
+                          <div className="text-zinc-500 text-[10px]">5 outcomes × 2% × 2 = 20% fee overhead</div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Type 2: Cross-Market Arbitrage */}
+            <div className="grid grid-cols-12 gap-4">
+              <div className="col-span-7">
+                <CrossMarketMonitor />
+              </div>
+              <div className="col-span-5">
+                <div className="p-4 rounded-lg border border-zinc-700 bg-zinc-900/50 h-full">
+                  <h3 className="text-sm font-medium text-zinc-400 mb-3">
+                    <span className="text-blue-400">Type 2:</span> Cross-Market Dependencies
+                  </h3>
+                  <div className="space-y-3">
+                    <div className="p-3 rounded bg-zinc-800/50 border border-zinc-700/50">
+                      <div className="text-xs text-blue-400 mb-2 font-medium">⏰ Temporal Dependencies</div>
+                      <div className="text-xs text-zinc-400">
+                        <p>"X by March" should have P ≤ "X by June"</p>
+                        <p className="text-zinc-500 mt-1">If the earlier deadline has higher probability, arbitrage exists.</p>
+                      </div>
+                    </div>
+                    <div className="p-3 rounded bg-zinc-800/50 border border-zinc-700/50">
+                      <div className="text-xs text-purple-400 mb-2 font-medium">📊 Threshold Dependencies</div>
+                      <div className="text-xs text-zinc-400">
+                        <p>"Price {">"} $100" should have P ≤ "Price {">"} $50"</p>
+                        <p className="text-zinc-500 mt-1">Reaching $100 requires first reaching $50.</p>
+                      </div>
+                    </div>
+                    <div className="p-2 bg-amber-500/10 border border-amber-500/20 rounded">
+                      <div className="text-amber-400 text-xs font-medium">Strategy</div>
+                      <div className="text-zinc-500 text-[10px]">
+                        When violation detected: Sell the overpriced market, buy the underpriced one.
+                        Profit = price difference - fees (8% for 4 legs).
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         )}

@@ -13,6 +13,15 @@ import * as priceHistory from './priceHistory.js';
 import * as auditStorage from './auditStorage.js';
 import * as configPresets from './configPresets.js';
 
+// New Frank-Wolfe arbitrage modules
+import { validateType1Market, validatePriceSum } from './marketValidator.js';
+import { FrankWolfeEngine, analyzeArbitrage } from './frankWolfe.js';
+import { SettlementLagScanner, scanSettlementLag } from './settlementLag.js';
+import { DependencyGraph, analyzeCrossMarketDependencies as analyzeType2Dependencies } from './dependencyGraph.js';
+
+// Mock data for testing when API is unreachable
+import { MOCK_EVENTS, USE_MOCK_DATA, getMockEvents } from './mockData.js';
+
 const app = express();
 const PORT = 3001;
 const WS_PORT = 3002;
@@ -1573,6 +1582,1200 @@ app.delete('/api/presets/strategy/:strategy/:name', (req, res) => {
 });
 
 // ============================================================================
+// MULTI-OUTCOME ARBITRAGE SCANNER (Frank-Wolfe / NegRisk Markets)
+// ============================================================================
+// Based on "Arbitrage-Free Combinatorial Market Making via Integer Programming"
+// Scans multi-outcome events where sum of outcome probabilities should = 1
+// Type 1 mispricing: sum ≠ 1 creates guaranteed arbitrage opportunity
+
+// Scanner config
+const arbitrageConfig = {
+  minMispricing: 0.02,     // 2% minimum mispricing to consider (after fees)
+  feeRate: 0.02,           // 2% fee per trade on Polymarket
+  minLiquidity: 1,         // Minimum $1 liquidity per outcome (lowered for analysis)
+  maxEvents: 100,          // Max events to scan
+  alphaExtraction: 0.9,    // Stop when 90% of profit extractable (from research)
+};
+
+// State
+let lastArbitrageScan = {
+  events: [],
+  opportunities: [],
+  totalEvents: 0,
+  multiOutcomeEvents: 0,
+  withMispricing: 0,
+  qualifyingOpportunities: 0,
+  scanTime: 0,
+  timestamp: Date.now(),
+  errors: ['Initializing scanner...'],
+  scanType: 'multi-outcome',
+};
+let arbitrageScanInProgress = false;
+
+// Multi-outcome event storage
+const multiOutcomeEvents = new Map(); // eventId -> event analysis
+
+/**
+ * Fetch all active events (not markets) from Polymarket
+ * Events contain multiple markets/outcomes
+ */
+async function fetchActiveEvents() {
+  const events = [];
+  let offset = 0;
+  const limit = 50;
+  let networkFailed = false;
+
+  while (events.length < arbitrageConfig.maxEvents) {
+    try {
+      const url = `${GAMMA_API}/events?active=true&closed=false&limit=${limit}&offset=${offset}`;
+      console.log(`[ARB-FW] Fetching events: offset=${offset}`);
+
+      // Add 10 second timeout to prevent hanging
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (compatible; ArbitrageBot/1.0)',
+        },
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        console.log(`[ARB-FW] API returned ${response.status}, stopping fetch`);
+        break;
+      }
+      const data = await response.json();
+      if (!Array.isArray(data) || data.length === 0) break;
+
+      events.push(...data);
+      offset += limit;
+
+      await new Promise(r => setTimeout(r, 50));
+    } catch (error) {
+      console.error('[ARB-FW] Failed to fetch events:', error.message);
+      networkFailed = true;
+      break;
+    }
+  }
+
+  // If no events fetched and mock mode is enabled, use mock data
+  if (events.length === 0 && (USE_MOCK_DATA || networkFailed)) {
+    console.log('[ARB-FW] ⚠️ Network unavailable - using MOCK DATA for testing');
+    const mockEvents = getMockEvents();
+    console.log(`[ARB-FW] Loaded ${mockEvents.length} mock events`);
+    return mockEvents;
+  }
+
+  console.log(`[ARB-FW] Total events fetched: ${events.length}`);
+  return events;
+}
+
+/**
+ * Extract token IDs from a market
+ */
+function extractTokenIds(market) {
+  let yesTokenId = '';
+  let noTokenId = '';
+
+  if (market.clobTokenIds) {
+    try {
+      const tokenIds = typeof market.clobTokenIds === 'string'
+        ? JSON.parse(market.clobTokenIds)
+        : market.clobTokenIds;
+      if (Array.isArray(tokenIds) && tokenIds.length >= 2) {
+        yesTokenId = tokenIds[0];
+        noTokenId = tokenIds[1];
+      }
+    } catch (e) {}
+  }
+
+  return { yesTokenId, noTokenId };
+}
+
+/**
+ * Helper: wrap a promise with a timeout to prevent hanging
+ */
+function withTimeout(promise, ms) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms))
+  ]);
+}
+
+/**
+ * Get order book prices for a token
+ */
+async function getOutcomePrices(tokenId) {
+  try {
+    // Add 5 second timeout to prevent hanging
+    const book = await withTimeout(clobClient.getOrderBook(tokenId), 5000);
+    const asks = book?.asks || [];
+    const bids = book?.bids || [];
+
+    return {
+      bestAsk: asks.length > 0 ? Math.min(...asks.map(a => parseFloat(a.price))) : 0.5,
+      bestBid: bids.length > 0 ? Math.max(...bids.map(b => parseFloat(b.price))) : 0.5,
+      liquidity: bids.slice(0, 5).reduce((sum, b) => sum + parseFloat(b.size) * parseFloat(b.price), 0),
+    };
+  } catch (error) {
+    // Timeout or other error - return defaults
+    return { bestAsk: 0.5, bestBid: 0.5, liquidity: 0 };
+  }
+}
+
+/**
+ * Detect if outcomes are temporal deadlines (e.g., "by March 31" vs "by December 31")
+ * These are NOT mutually exclusive and should NOT be treated as sum=1 arbitrage
+ */
+function isTemporalDeadlineEvent(eventData, markets) {
+  const eventTitle = (eventData?.title || '').toLowerCase();
+
+  // STRONG SIGNAL: Event title contains "by...?" pattern
+  // e.g., "Will Russia capture Lyman by...?" or "Will X happen by...?"
+  if (/\bby\s*\.{2,}\??$/i.test(eventTitle) || /\bby\s+when/i.test(eventTitle)) {
+    return true;
+  }
+
+  // STRONG SIGNAL: Event title ends with "by [date]?" pattern
+  // e.g., "Will X happen by March 2025?"
+  if (/by\s+(january|february|march|april|may|june|july|august|september|october|november|december|q[1-4]|\d{4})/i.test(eventTitle)) {
+    return true;
+  }
+
+  const datePatterns = [
+    // "by March", "by February 28", etc.
+    /by\s+(january|february|march|april|may|june|july|august|september|october|november|december)/i,
+    /by\s+(Q[1-4])/i,
+    /by\s+end\s+of\s+\d{4}/i,
+    /by\s+\d{4}/i,
+    // "March 31, 2025" - full date with year
+    /(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s*\d{4}/i,
+    // "February 28", "March 31" - month + day without year (CRITICAL for Lyman-style markets)
+    /^(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}$/i,
+    // Looser match: contains "Month Day" anywhere (trimmed)
+    /(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2}(?:\s|$|,)/i,
+  ];
+
+  let temporalCount = 0;
+  for (const market of markets) {
+    const title = (market.groupItemTitle || market.question || '').trim();
+    for (const pattern of datePatterns) {
+      if (pattern.test(title)) {
+        temporalCount++;
+        break;
+      }
+    }
+  }
+
+  // If most outcomes have date patterns, it's likely a temporal deadline event
+  return temporalCount >= markets.length * 0.5;
+}
+
+/**
+ * Detect if this is an "independent events" market where outcomes are unrelated
+ * e.g., "What will happen before X?" with outcomes like [Album release, War, Election, etc.]
+ * These are NOT mutually exclusive - multiple (or all, or none) can happen
+ */
+function isIndependentEventsMarket(eventData, markets) {
+  const title = (eventData.title || '').toLowerCase();
+
+  // Pattern 1: "What will happen" style questions
+  const independentPatterns = [
+    /what will happen/i,
+    /what happens/i,
+    /which.*will happen/i,
+    /things that will/i,
+    /events.*before/i,
+    /predictions for/i,
+    /will any of/i,
+    /how many.*will/i,
+  ];
+
+  for (const pattern of independentPatterns) {
+    if (pattern.test(title)) {
+      return true;
+    }
+  }
+
+  // Pattern 2: Outcomes are completely unrelated topics
+  // Check if outcomes span multiple unrelated categories
+  const categories = new Set();
+  const categoryKeywords = {
+    music: ['album', 'song', 'release', 'drake', 'rihanna', 'carti', 'music', 'artist'],
+    politics: ['president', 'election', 'trump', 'biden', 'congress', 'vote', 'political'],
+    war: ['war', 'invasion', 'military', 'ceasefire', 'russia', 'ukraine', 'china', 'taiwan'],
+    tech: ['gpt', 'ai', 'released', 'launch', 'apple', 'google', 'tesla'],
+    crypto: ['bitcoin', 'btc', 'eth', 'crypto', '$1m', '$100k'],
+    religion: ['jesus', 'christ', 'god', 'religious'],
+    sports: ['championship', 'world cup', 'super bowl', 'nba', 'nfl'],
+  };
+
+  for (const market of markets) {
+    const outcomeTitle = (market.groupItemTitle || market.question || '').toLowerCase();
+    for (const [category, keywords] of Object.entries(categoryKeywords)) {
+      if (keywords.some(kw => outcomeTitle.includes(kw))) {
+        categories.add(category);
+        break;
+      }
+    }
+  }
+
+  // If outcomes span 3+ unrelated categories, it's likely independent events
+  if (categories.size >= 3) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Detect if this is a cumulative/threshold market where outcomes are NOT mutually exclusive
+ * e.g., "Will BTC reach $100k/$125k/$150k?" - reaching $150k means $100k and $125k are also true
+ * e.g., "Total wins: 0/1/2/3/4/5/6" - VALID (exactly one total)
+ * e.g., "Reach X by date" - if prices are cumulative (higher price = superset of lower) = INVALID
+ */
+function isCumulativeThresholdMarket(eventData, markets) {
+  const title = (eventData.title || '').toLowerCase();
+
+  // Pattern 1: "Will X reach/hit/exceed $Y" with multiple price thresholds
+  // Check if outcomes contain ascending numeric thresholds
+  const thresholdPatterns = [
+    /reach\s*\$?\d/i,
+    /hit\s*\$?\d/i,
+    /exceed\s*\$?\d/i,
+    /above\s*\$?\d/i,
+    /over\s*\$?\d/i,
+    /\$\d+k?\+/i,  // "$100k+" style
+  ];
+
+  if (thresholdPatterns.some(p => p.test(title))) {
+    // Extract numeric values from outcome titles
+    const values = [];
+    for (const market of markets) {
+      const outcomeTitle = (market.groupItemTitle || market.question || '').toLowerCase();
+      // Match prices like $100k, $125,000, 100000, etc.
+      const matches = outcomeTitle.match(/\$?([\d,]+)k?/g);
+      if (matches) {
+        for (const m of matches) {
+          const num = parseFloat(m.replace(/[$,k]/gi, '')) * (m.toLowerCase().includes('k') ? 1000 : 1);
+          if (!isNaN(num) && num > 0) values.push(num);
+        }
+      }
+    }
+
+    // If we have ascending threshold values, it's cumulative
+    if (values.length >= 2) {
+      const sorted = [...new Set(values)].sort((a, b) => a - b);
+      // Check if these look like cumulative thresholds (all different values)
+      if (sorted.length >= 2) {
+        return true;
+      }
+    }
+  }
+
+  // Pattern 2: "More than X" style outcomes
+  const morePatterns = [
+    /more than \d/i,
+    /at least \d/i,
+    /\d\+ /i,
+    /\d or more/i,
+  ];
+
+  let moreCount = 0;
+  for (const market of markets) {
+    const outcomeTitle = (market.groupItemTitle || market.question || '').toLowerCase();
+    if (morePatterns.some(p => p.test(outcomeTitle))) {
+      moreCount++;
+    }
+  }
+
+  // If multiple outcomes use "more than" / "at least" patterns, likely cumulative
+  if (moreCount >= 2) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Master validation: Is this a valid Type 1 arbitrage market?
+ * For Type 1 to be valid, outcomes MUST be:
+ * 1. Mutually exclusive (exactly one can be TRUE)
+ * 2. Exhaustive (one MUST be TRUE)
+ *
+ * VALID examples:
+ * - "Who will win the election?" (exactly one winner)
+ * - "Which team wins the championship?" (exactly one champion)
+ * - "What will the price be? <$50k / $50k-$100k / >$100k" (non-overlapping ranges)
+ *
+ * INVALID examples:
+ * - "Will X happen by March/June/December?" (nested deadlines)
+ * - "What will happen before Y?" with unrelated outcomes
+ * - "Will X reach $100k/$150k/$200k?" (cumulative thresholds)
+ */
+function isValidType1ArbitrageMarket(eventData, markets) {
+  // Check 1: Skip temporal deadline events
+  if (isTemporalDeadlineEvent(eventData, markets)) {
+    console.log(`[ARB-VALIDATE] INVALID - Temporal deadlines: ${eventData.title}`);
+    return false;
+  }
+
+  // Check 2: Skip independent events markets
+  if (isIndependentEventsMarket(eventData, markets)) {
+    console.log(`[ARB-VALIDATE] INVALID - Independent events: ${eventData.title}`);
+    return false;
+  }
+
+  // Check 3: Skip cumulative threshold markets
+  if (isCumulativeThresholdMarket(eventData, markets)) {
+    console.log(`[ARB-VALIDATE] INVALID - Cumulative thresholds: ${eventData.title}`);
+    return false;
+  }
+
+  // Check 4: If sum of prices > 2.0, almost certainly NOT mutually exclusive
+  // (Real mutually exclusive markets should hover around 1.0)
+  // This catches markets where multiple outcomes can all be true
+
+  // Check 5: Look for "Who will win" / "Which X" patterns (strong indicators of valid markets)
+  const validPatterns = [
+    /who will win/i,
+    /which.*will win/i,
+    /winner of/i,
+    /next.*president/i,
+    /next.*prime minister/i,
+    /what place will/i,
+    /what will.*finish/i,
+    /where will.*finish/i,
+  ];
+
+  const title = (eventData.title || '').toLowerCase();
+  const hasValidPattern = validPatterns.some(p => p.test(title));
+
+  if (hasValidPattern) {
+    console.log(`[ARB-VALIDATE] VALID - Winner/placement market: ${eventData.title}`);
+    return true;
+  }
+
+  // Default: Allow markets that passed all negative checks
+  // They might still be valid mutually exclusive markets
+  console.log(`[ARB-VALIDATE] VALID (default) - ${eventData.title}`);
+  return true;
+}
+
+/**
+ * Process a multi-outcome event and calculate arbitrage using Frank-Wolfe engine
+ */
+async function processMultiOutcomeEvent(eventData) {
+  const markets = eventData.markets || [];
+
+  // Only interested in multi-outcome events (2+ markets)
+  const activeMarkets = markets.filter(m => m.active && !m.closed);
+  if (activeMarkets.length < 2) return null;
+
+  // CRITICAL: Validate using new modular validator
+  // Checks: temporal deadlines, independent events, cumulative thresholds
+  const validation = validateType1Market(eventData, activeMarkets);
+  if (!validation.isValid) {
+    console.log(`[ARB-FW] Skipping invalid market: ${eventData.title} - ${validation.reason}`);
+    return null;
+  }
+
+  // Log valid markets with their confidence level
+  if (validation.confidence === 'HIGH') {
+    console.log(`[ARB-FW] Valid market (HIGH confidence): ${eventData.title}`);
+  }
+
+  const outcomes = [];
+  let totalYesPrice = 0;
+  let minLiquidity = Infinity;
+
+  // Fetch prices for each outcome
+  for (const market of activeMarkets) {
+    const { yesTokenId } = extractTokenIds(market);
+
+    let price = 0.5;
+    let liquidity = 0;
+
+    // First try to get embedded prices from market data (works for mock data)
+    if (market.outcomePrices) {
+      try {
+        const prices = typeof market.outcomePrices === 'string'
+          ? JSON.parse(market.outcomePrices)
+          : market.outcomePrices;
+        if (Array.isArray(prices) && prices.length > 0) {
+          price = parseFloat(prices[0]) || 0.5;  // YES price is first
+          liquidity = market.volume || 1000;  // Use volume as proxy for liquidity
+        }
+      } catch (e) {}
+    }
+
+    // If we have a real token ID and no embedded price, try order book
+    if (yesTokenId && !yesTokenId.startsWith('mock-')) {
+      const priceData = await getOutcomePrices(yesTokenId);
+      if (priceData.bestAsk !== 0.5 || priceData.liquidity > 0) {
+        price = priceData.bestAsk;
+        liquidity = priceData.liquidity;
+      }
+    }
+
+    outcomes.push({
+      id: market.conditionId || market.id,
+      question: market.question || '',
+      groupItemTitle: market.groupItemTitle || market.question,
+      price,
+      liquidity,
+    });
+
+    totalYesPrice += price;
+    minLiquidity = Math.min(minLiquidity, liquidity);
+  }
+
+  // Post-price validation using new module
+  const priceValidation = validatePriceSum(totalYesPrice, outcomes.length);
+  if (!priceValidation.isValid) {
+    console.log(`[ARB-FW] Skipping: ${eventData.title} - ${priceValidation.reason}`);
+    return null;
+  }
+
+  // Use Frank-Wolfe engine for sophisticated analysis
+  const fwEngine = new FrankWolfeEngine({
+    alphaExtraction: arbitrageConfig.alphaExtraction,
+    feeRate: arbitrageConfig.feeRate,
+    epsilonD: arbitrageConfig.minMispricing,
+  });
+
+  const fwAnalysis = fwEngine.analyze(outcomes, eventData);
+
+  // Build result object with Frank-Wolfe metrics
+  const mispricing = totalYesPrice - 1.0;
+  const absoluteMispricing = Math.abs(mispricing);
+
+  // Determine opportunity type
+  let opportunityType = 'NONE';
+  if (fwAnalysis.hasArbitrage) {
+    opportunityType = fwAnalysis.strategy;
+  }
+
+  // Qualification check with enhanced reasons
+  const reasons = [...(fwAnalysis.reasons || [])];
+  let qualifies = fwAnalysis.hasArbitrage && fwAnalysis.profitAfterFees > 0;
+
+  if (minLiquidity < arbitrageConfig.minLiquidity) {
+    reasons.push(`Insufficient liquidity: $${minLiquidity.toFixed(0)} < $${arbitrageConfig.minLiquidity} minimum`);
+    qualifies = false;
+  }
+
+  // Add validation confidence to reasons
+  reasons.push(`Validation: ${validation.confidence} confidence (${validation.type || 'unknown type'})`);
+
+  if (qualifies) {
+    reasons.unshift(`✓ ARBITRAGE: ${opportunityType} all ${outcomes.length} outcomes for ${(fwAnalysis.profitAfterFees * 100).toFixed(2)}% profit`);
+  }
+
+  return {
+    id: eventData.id,
+    slug: eventData.slug,
+    title: eventData.title,
+    description: eventData.description?.slice(0, 200),
+    url: `https://polymarket.com/event/${eventData.slug}`,
+    isNegRisk: eventData.negRisk || false,
+    numOutcomes: outcomes.length,
+    outcomes,
+    totalYesPrice,
+    mispricing,
+    absoluteMispricing,
+    opportunityType,
+    rawProfit: fwAnalysis.rawProfit || absoluteMispricing,
+    fees: fwAnalysis.fees || (outcomes.length * arbitrageConfig.feeRate * 2),
+    profitAfterFees: fwAnalysis.profitAfterFees || 0,
+    minLiquidity,
+    qualifies,
+    reasons,
+    // Frank-Wolfe specific metrics
+    frankWolfe: {
+      bregmanDivergence: fwAnalysis.bregmanDivergence,
+      guaranteedProfit: fwAnalysis.guaranteedProfit,
+      extractionRate: fwAnalysis.extractionRate,
+      maxPositionSize: fwAnalysis.maxPositionSize,
+      expectedDollarProfit: fwAnalysis.expectedDollarProfit,
+    },
+    validationConfidence: validation.confidence,
+    lastUpdated: Date.now(),
+  };
+}
+
+/**
+ * Run full arbitrage scan on multi-outcome events
+ * This is the main scan function based on Frank-Wolfe arbitrage principles
+ */
+async function runMultiOutcomeArbitrageScan() {
+  if (arbitrageScanInProgress) {
+    console.log('[ARB-FW] Scan already in progress...');
+    // Return last result or empty result if none exists yet
+    return lastArbitrageScan || {
+      events: [],
+      opportunities: [],
+      totalEvents: 0,
+      multiOutcomeEvents: 0,
+      withMispricing: 0,
+      qualifyingOpportunities: 0,
+      scanTime: 0,
+      timestamp: Date.now(),
+      errors: ['Scan in progress, please wait...'],
+      scanType: 'multi-outcome',
+    };
+  }
+
+  arbitrageScanInProgress = true;
+  const startTime = Date.now();
+
+  console.log('\n[ARB-FW] ════════════════════════════════════════════════════════');
+  console.log('[ARB-FW] Starting MULTI-OUTCOME arbitrage scan (Frank-Wolfe)');
+  console.log('[ARB-FW] Looking for NegRisk events where sum(outcomes) ≠ 1');
+
+  const results = {
+    events: [],
+    opportunities: [],
+    totalEvents: 0,
+    multiOutcomeEvents: 0,
+    withMispricing: 0,
+    qualifyingOpportunities: 0,
+    scanTime: 0,
+    timestamp: Date.now(),
+    errors: [],
+    scanType: 'multi-outcome',
+  };
+
+  try {
+    // Fetch events (not individual markets)
+    const rawEvents = await fetchActiveEvents();
+    results.totalEvents = rawEvents.length;
+    console.log(`[ARB-FW] Fetched ${rawEvents.length} events`);
+
+    // Process each event
+    for (const eventData of rawEvents) {
+      // Skip single-market events
+      const markets = eventData.markets || [];
+      if (markets.length < 2) continue;
+
+      results.multiOutcomeEvents++;
+
+      try {
+        const analysis = await processMultiOutcomeEvent(eventData);
+        if (!analysis) continue;
+
+        // Store in cache
+        multiOutcomeEvents.set(analysis.id, analysis);
+
+        // Add to results
+        results.events.push(analysis);
+
+        if (analysis.absoluteMispricing >= 0.01) {
+          results.withMispricing++;
+        }
+
+        if (analysis.qualifies) {
+          results.qualifyingOpportunities++;
+          results.opportunities.push(analysis);
+          console.log(`[ARB-FW] 🎯 OPPORTUNITY: ${analysis.title}`);
+          console.log(`[ARB-FW]    ${analysis.numOutcomes} outcomes, Sum: ${analysis.totalYesPrice.toFixed(3)}`);
+          console.log(`[ARB-FW]    Mispricing: ${(analysis.mispricing * 100).toFixed(2)}%, Profit: ${(analysis.profitAfterFees * 100).toFixed(2)}%`);
+        }
+      } catch (e) {
+        // Skip events that fail
+      }
+
+      // Rate limiting
+      await new Promise(r => setTimeout(r, 30));
+    }
+
+    // Sort by profit potential
+    results.events.sort((a, b) => b.absoluteMispricing - a.absoluteMispricing);
+    results.opportunities.sort((a, b) => b.profitAfterFees - a.profitAfterFees);
+
+  } catch (error) {
+    results.errors.push(error.message);
+    console.error('[ARB-FW] Scan error:', error.message);
+  } finally {
+    // ALWAYS reset the flag, even if there's an error
+    arbitrageScanInProgress = false;
+  }
+
+  results.scanTime = Date.now() - startTime;
+
+  console.log('[ARB-FW] ────────────────────────────────────────────────────────');
+  console.log(`[ARB-FW] Scan complete in ${results.scanTime}ms`);
+  console.log(`[ARB-FW] Total events: ${results.totalEvents}`);
+  console.log(`[ARB-FW] Multi-outcome events: ${results.multiOutcomeEvents}`);
+  console.log(`[ARB-FW] With mispricing (>1%): ${results.withMispricing} (${((results.withMispricing / Math.max(1, results.multiOutcomeEvents)) * 100).toFixed(1)}%)`);
+  console.log(`[ARB-FW] Qualifying opportunities: ${results.qualifyingOpportunities}`);
+  console.log('[ARB-FW] ════════════════════════════════════════════════════════\n');
+
+  lastArbitrageScan = results;
+  return results;
+}
+
+// ============================================================================
+// ARBITRAGE API ROUTES
+// ============================================================================
+
+// Run multi-outcome arbitrage scan (Frank-Wolfe style)
+app.get('/api/arbitrage/scan', async (req, res) => {
+  try {
+    // If scan is in progress, wait for it to complete (up to 60 seconds)
+    if (arbitrageScanInProgress) {
+      console.log('[ARB-API] Scan in progress, waiting...');
+      let waited = 0;
+      while (arbitrageScanInProgress && waited < 60000) {
+        await new Promise(r => setTimeout(r, 500));
+        waited += 500;
+      }
+      // Return the updated result after waiting
+      res.json(lastArbitrageScan);
+      return;
+    }
+
+    const result = await runMultiOutcomeArbitrageScan();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get cached result
+app.get('/api/arbitrage/result', (req, res) => {
+  if (lastArbitrageScan) {
+    res.json(lastArbitrageScan);
+  } else {
+    res.json({
+      events: [],
+      opportunities: [],
+      totalEvents: 0,
+      multiOutcomeEvents: 0,
+      qualifyingOpportunities: 0,
+      scanTime: 0,
+      timestamp: Date.now(),
+      errors: ['No scan performed yet. Call /api/arbitrage/scan first.'],
+      scanType: 'multi-outcome',
+    });
+  }
+});
+
+// Diagnostic endpoint - shows scanner state
+app.get('/api/arbitrage/status', (req, res) => {
+  res.json({
+    scanInProgress: arbitrageScanInProgress,
+    hasCachedResult: !!lastArbitrageScan,
+    cachedResultTimestamp: lastArbitrageScan?.timestamp,
+    cachedEventCount: lastArbitrageScan?.events?.length || 0,
+    cachedOpportunityCount: lastArbitrageScan?.opportunities?.length || 0,
+    cachedErrors: lastArbitrageScan?.errors || [],
+    serverTime: Date.now(),
+  });
+});
+
+// Force refresh
+app.post('/api/arbitrage/refresh', async (req, res) => {
+  try {
+    multiOutcomeEvents.clear();
+    const result = await runMultiOutcomeArbitrageScan();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Update arbitrage config
+app.post('/api/arbitrage/config', (req, res) => {
+  const { minLiquidity, minMispricing, maxEvents, feeRate, alphaExtraction } = req.body;
+  if (minLiquidity !== undefined) arbitrageConfig.minLiquidity = minLiquidity;
+  if (minMispricing !== undefined) arbitrageConfig.minMispricing = minMispricing;
+  if (maxEvents !== undefined) arbitrageConfig.maxEvents = maxEvents;
+  if (feeRate !== undefined) arbitrageConfig.feeRate = feeRate;
+  if (alphaExtraction !== undefined) arbitrageConfig.alphaExtraction = alphaExtraction;
+  console.log('[ARB-FW] Config updated:', arbitrageConfig);
+  res.json({ success: true, config: arbitrageConfig });
+});
+
+// Get arbitrage config
+app.get('/api/arbitrage/config', (req, res) => {
+  res.json({
+    ...arbitrageConfig,
+    description: 'Multi-outcome event scanner based on Frank-Wolfe arbitrage principles',
+    scanType: 'multi-outcome',
+  });
+});
+
+// ============================================================================
+// TYPE 2 ARBITRAGE: CROSS-MARKET DEPENDENCIES
+// ============================================================================
+
+// Cache for cross-market dependency scan results
+let lastCrossMarketScan = null;
+
+/**
+ * Scan for cross-market dependencies (Type 2 arbitrage)
+ * Finds logical relationships between markets:
+ * - Temporal: "X by March" should have P <= "X by June"
+ * - Threshold: "Price > $100" should have P <= "Price > $50"
+ */
+app.get('/api/arbitrage/cross-market', async (req, res) => {
+  console.log('\n[ARB-TYPE2] ════════════════════════════════════════════════════');
+  console.log('[ARB-TYPE2] Starting cross-market dependency scan...');
+
+  const startTime = Date.now();
+
+  try {
+    // First, fetch all active markets
+    const allMarkets = [];
+    let offset = 0;
+    const limit = 100;
+
+    while (allMarkets.length < 500) {
+      const url = `${GAMMA_API}/markets?active=true&closed=false&limit=${limit}&offset=${offset}`;
+      console.log(`[ARB-TYPE2] Fetching markets: offset=${offset}`);
+
+      const response = await fetch(url, {
+        headers: {
+          'Accept': 'application/json',
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+        },
+      });
+
+      if (!response.ok) break;
+      const markets = await response.json();
+      if (!Array.isArray(markets) || markets.length === 0) break;
+
+      allMarkets.push(...markets);
+      offset += limit;
+      await new Promise(r => setTimeout(r, 50));
+    }
+
+    console.log(`[ARB-TYPE2] Fetched ${allMarkets.length} markets for dependency analysis`);
+
+    // Now analyze for cross-market dependencies
+    const result = await analyzeCrossMarketDependencies(allMarkets);
+
+    result.scanTime = Date.now() - startTime;
+    lastCrossMarketScan = result;
+
+    console.log('[ARB-TYPE2] ────────────────────────────────────────────────────');
+    console.log(`[ARB-TYPE2] Scan complete in ${result.scanTime}ms`);
+    console.log(`[ARB-TYPE2] Temporal deps: ${result.stats.temporalDependencies}`);
+    console.log(`[ARB-TYPE2] Threshold deps: ${result.stats.thresholdDependencies}`);
+    console.log(`[ARB-TYPE2] Violations: ${result.stats.violations}`);
+    console.log(`[ARB-TYPE2] Opportunities: ${result.stats.qualifyingOpportunities}`);
+    console.log('[ARB-TYPE2] ════════════════════════════════════════════════════\n');
+
+    res.json(result);
+  } catch (error) {
+    console.error('[ARB-TYPE2] Scan error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get cached cross-market result
+app.get('/api/arbitrage/cross-market/result', (req, res) => {
+  if (lastCrossMarketScan) {
+    res.json(lastCrossMarketScan);
+  } else {
+    res.json({
+      dependencies: [],
+      opportunities: [],
+      stats: {
+        totalMarkets: 0,
+        temporalDependencies: 0,
+        thresholdDependencies: 0,
+        violations: 0,
+        qualifyingOpportunities: 0,
+        scanTime: 0,
+      },
+      errors: ['No cross-market scan performed yet. Call /api/arbitrage/cross-market first.'],
+      timestamp: Date.now(),
+    });
+  }
+});
+
+// ============================================================================
+// TYPE 3 ARBITRAGE: Settlement Lag Detection
+// Detects markets where outcomes are effectively determined but prices haven't locked
+// ============================================================================
+
+let lastSettlementLagScan = null;
+
+/**
+ * Scan for settlement lag opportunities (Type 3)
+ * Detects markets where price should be 0 or 1 but isn't
+ */
+app.get('/api/arbitrage/settlement-lag', async (req, res) => {
+  console.log('\n[ARB-TYPE3] ════════════════════════════════════════════════════');
+  console.log('[ARB-TYPE3] Starting settlement lag scan...');
+
+  const startTime = Date.now();
+
+  try {
+    // Fetch recently closed markets (settlement lag targets) AND active markets
+    const allMarkets = [];
+
+    // Fetch closed markets (where settlement lag matters most)
+    for (const filter of ['closed=true', 'active=true']) {
+      let offset = 0;
+      const limit = 100;
+      while (allMarkets.length < 300) {
+        const url = `${GAMMA_API}/markets?${filter}&order=endDate&ascending=false&limit=${limit}&offset=${offset}`;
+        console.log(`[ARB-TYPE3] Fetching markets: ${filter}, offset=${offset}`);
+
+        const response = await fetch(url, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)',
+          },
+        });
+
+        if (!response.ok) break;
+        const markets = await response.json();
+        if (!Array.isArray(markets) || markets.length === 0) break;
+
+        allMarkets.push(...markets);
+        offset += limit;
+        await new Promise(r => setTimeout(r, 50));
+
+        // Only fetch 1 page of active markets (settlement lag is mainly about closed ones)
+        if (filter === 'active=true') break;
+      }
+    }
+
+    // Client-side filter: only keep markets with endDate within last 90 days
+    const now = Date.now();
+    const ninetyDaysMs = 90 * 24 * 60 * 60 * 1000;
+    const recentMarkets = allMarkets.filter(m => {
+      const endDate = m.endDateIso || m.endDate;
+      if (!endDate) return true; // Keep markets without end dates (active ones)
+      const endTime = new Date(endDate).getTime();
+      return !isNaN(endTime) && (now - endTime) < ninetyDaysMs;
+    });
+
+    console.log(`[ARB-TYPE3] Fetched ${allMarkets.length} markets, ${recentMarkets.length} within last 90 days`);
+
+    // Enrich with price data - use outcomePrices from Gamma as primary source
+    for (const market of recentMarkets) {
+      // Primary: Parse outcomePrices from Gamma API response
+      if (market.outcomePrices) {
+        try {
+          const prices = typeof market.outcomePrices === 'string'
+            ? JSON.parse(market.outcomePrices) : market.outcomePrices;
+          if (Array.isArray(prices) && prices.length > 0) {
+            market.price = parseFloat(prices[0]) || 0.5;
+            // Estimate bid/ask from embedded price (tight spread assumption)
+            market.bestBid = Math.max(0, market.price - 0.02);
+            market.bestAsk = Math.min(1, market.price + 0.02);
+          }
+        } catch (e) {}
+      }
+
+      // Map Gamma fields to scanner-expected fields
+      market.endDate = market.endDateIso || market.endDate;
+      market.volume24h = parseFloat(market.volume24hr || market.volume || '0');
+      market.liquidity = parseFloat(market.liquidityNum || market.liquidity || '0');
+      market.settled = market.settled === true || market.settled === 'true';
+
+      // Secondary: Try CLOB order book for more accurate prices (only if active)
+      if (market.active && !market.closed) {
+        const { yesTokenId } = extractTokenIds(market);
+        if (yesTokenId) {
+          try {
+            const priceData = await getOutcomePrices(yesTokenId);
+            if (priceData.bestAsk !== 0.5 || priceData.bestBid !== 0.5) {
+              // Only override if we got real data (not defaults)
+              market.price = priceData.bestAsk;
+              market.bestBid = priceData.bestBid;
+              market.bestAsk = priceData.bestAsk;
+              market.liquidity = priceData.liquidity;
+            }
+          } catch (e) {
+            // CLOB failed, keep Gamma prices
+          }
+        }
+      }
+    }
+
+    // Use the settlement lag scanner
+    const scanner = new SettlementLagScanner();
+    const opportunities = scanner.scan(recentMarkets);
+
+    const result = {
+      opportunities,
+      stats: {
+        totalMarkets: recentMarkets.length,
+        marketsAnalyzed: recentMarkets.filter(m => m.price !== undefined).length,
+        opportunitiesFound: opportunities.length,
+        totalPotentialProfit: opportunities.reduce((sum, o) => sum + o.potentialProfit, 0),
+      },
+      scanTime: Date.now() - startTime,
+      timestamp: Date.now(),
+    };
+
+    lastSettlementLagScan = result;
+
+    console.log('[ARB-TYPE3] ────────────────────────────────────────────────────');
+    console.log(`[ARB-TYPE3] Scan complete in ${result.scanTime}ms`);
+    console.log(`[ARB-TYPE3] Markets analyzed: ${result.stats.marketsAnalyzed}`);
+    console.log(`[ARB-TYPE3] Opportunities found: ${result.stats.opportunitiesFound}`);
+    console.log('[ARB-TYPE3] ════════════════════════════════════════════════════\n');
+
+    res.json(result);
+  } catch (error) {
+    console.error('[ARB-TYPE3] Scan error:', error.message);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Get cached settlement lag result
+app.get('/api/arbitrage/settlement-lag/result', (req, res) => {
+  if (lastSettlementLagScan) {
+    res.json(lastSettlementLagScan);
+  } else {
+    res.json({
+      opportunities: [],
+      stats: {
+        totalMarkets: 0,
+        marketsAnalyzed: 0,
+        opportunitiesFound: 0,
+        totalPotentialProfit: 0,
+      },
+      errors: ['No settlement lag scan performed yet. Call /api/arbitrage/settlement-lag first.'],
+      timestamp: Date.now(),
+    });
+  }
+});
+
+/**
+ * Analyze markets for cross-market dependencies
+ */
+async function analyzeCrossMarketDependencies(markets) {
+  const DATE_PATTERNS = [
+    /by\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{1,2})?,?\s*(\d{4})?/i,
+    /before\s+(january|february|march|april|may|june|july|august|september|october|november|december)\s*(\d{1,2})?,?\s*(\d{4})?/i,
+    /in\s+(Q[1-4])\s*(\d{4})?/i,
+    /by\s+(Q[1-4])\s*(\d{4})?/i,
+    /by\s+end\s+of\s+(\d{4})/i,
+    /by\s+(20\d{2})/i,
+  ];
+
+  const THRESHOLD_PATTERNS = [
+    /(?:above|over|exceed|reach|hit)\s*\$?([\d,]+(?:\.\d+)?)/i,
+    /(?:below|under)\s*\$?([\d,]+(?:\.\d+)?)/i,
+    />\s*\$?([\d,]+(?:\.\d+)?)/i,
+    /<\s*\$?([\d,]+(?:\.\d+)?)/i,
+  ];
+
+  const MONTH_ORDER = {
+    january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+    july: 7, august: 8, september: 9, october: 10, november: 11, december: 12,
+  };
+
+  // Helper functions
+  function extractSubject(question) {
+    if (!question) return '';
+    let subject = question
+      .replace(/^(will|can|does|is|are|has|have|do)\s+/i, '')
+      .replace(/\?$/, '')
+      .toLowerCase()
+      .trim();
+    for (const pattern of DATE_PATTERNS) {
+      subject = subject.replace(pattern, '');
+    }
+    for (const pattern of THRESHOLD_PATTERNS) {
+      subject = subject.replace(pattern, '');
+    }
+    return subject.trim();
+  }
+
+  function extractDeadline(question) {
+    if (!question) return null;
+    for (const pattern of DATE_PATTERNS) {
+      const match = question.match(pattern);
+      if (match) {
+        const raw = match[0];
+        if (match[1] && match[1].startsWith('Q')) {
+          const quarter = parseInt(match[1][1]);
+          const year = parseInt(match[2]) || new Date().getFullYear();
+          const endMonth = quarter * 3;
+          return { month: endMonth, day: 31, year, quarter, raw };
+        }
+        const month = MONTH_ORDER[match[1]?.toLowerCase()];
+        if (month) {
+          const day = parseInt(match[2]) || 31;
+          const year = parseInt(match[3]) || new Date().getFullYear();
+          return { month, day, year, quarter: null, raw };
+        }
+        const yearMatch = match[1]?.match(/^20\d{2}$/);
+        if (yearMatch) {
+          return { month: 12, day: 31, year: parseInt(match[1]), quarter: null, raw };
+        }
+      }
+    }
+    return null;
+  }
+
+  function extractThreshold(question) {
+    if (!question) return null;
+    const aboveMatch = question.match(/(?:above|over|exceed|reach|hit|>|at\s+least)\s*\$?([\d,]+(?:\.\d+)?)/i);
+    if (aboveMatch) {
+      return { value: parseFloat(aboveMatch[1].replace(/,/g, '')), direction: 'above' };
+    }
+    const belowMatch = question.match(/(?:below|under|<)\s*\$?([\d,]+(?:\.\d+)?)/i);
+    if (belowMatch) {
+      return { value: parseFloat(belowMatch[1].replace(/,/g, '')), direction: 'below' };
+    }
+    return null;
+  }
+
+  function compareDeadlines(a, b) {
+    if (!a || !b) return 0;
+    const dateA = new Date(a.year, a.month - 1, a.day);
+    const dateB = new Date(b.year, b.month - 1, b.day);
+    if (dateA < dateB) return -1;
+    if (dateA > dateB) return 1;
+    return 0;
+  }
+
+  function subjectSimilarity(subjectA, subjectB) {
+    if (!subjectA || !subjectB) return 0;
+    const wordsA = new Set(subjectA.toLowerCase().split(/\s+/));
+    const wordsB = new Set(subjectB.toLowerCase().split(/\s+/));
+    const stopWords = new Set(['the', 'a', 'an', 'to', 'of', 'in', 'for', 'on', 'with', 'at', 'by']);
+    const filteredA = [...wordsA].filter(w => !stopWords.has(w) && w.length > 2);
+    const filteredB = [...wordsB].filter(w => !stopWords.has(w) && w.length > 2);
+    if (filteredA.length === 0 || filteredB.length === 0) return 0;
+    const intersection = filteredA.filter(w => filteredB.includes(w)).length;
+    const union = new Set([...filteredA, ...filteredB]).size;
+    return intersection / union;
+  }
+
+  // Extract market prices
+  const marketsWithPrices = markets.map(m => ({
+    id: m.conditionId || m.id,
+    question: m.question,
+    slug: m.slug,
+    price: parseFloat(m.outcomePrices?.[0] || m.bestAsk || '0.5'),
+    category: m.category || m.groupItemTitle,
+  }));
+
+  // Find temporal dependencies
+  const temporalDeps = [];
+  const marketsWithDeadlines = marketsWithPrices
+    .map(m => ({ ...m, deadline: extractDeadline(m.question), subject: extractSubject(m.question) }))
+    .filter(m => m.deadline && m.subject);
+
+  for (let i = 0; i < marketsWithDeadlines.length; i++) {
+    for (let j = i + 1; j < marketsWithDeadlines.length; j++) {
+      const a = marketsWithDeadlines[i];
+      const b = marketsWithDeadlines[j];
+
+      const similarity = subjectSimilarity(a.subject, b.subject);
+      if (similarity < 0.5) continue;
+
+      const cmp = compareDeadlines(a.deadline, b.deadline);
+      if (cmp === 0) continue;
+
+      const earlier = cmp < 0 ? a : b;
+      const later = cmp < 0 ? b : a;
+
+      // Earlier deadline should have lower or equal probability
+      const violation = earlier.price > later.price + 0.01; // 1% tolerance
+      const profit = violation ? earlier.price - later.price : 0;
+      const fees = arbitrageConfig.feeRate * 4;
+      const profitAfterFees = profit - fees;
+
+      temporalDeps.push({
+        type: 'temporal',
+        marketA: { id: earlier.id, question: earlier.question, price: earlier.price },
+        marketB: { id: later.id, question: later.question, price: later.price },
+        expectedRelation: 'A <= B',
+        reasoning: `"${earlier.deadline.raw}" must occur before "${later.deadline.raw}"`,
+        violation,
+        arbitrageProfit: profit,
+        profitAfterFees,
+        qualifies: profitAfterFees > 0,
+        reasons: violation
+          ? [`P(earlier) ${earlier.price.toFixed(3)} > P(later) ${later.price.toFixed(3)}`]
+          : ['No violation'],
+      });
+    }
+  }
+
+  // Find threshold dependencies
+  const thresholdDeps = [];
+  const marketsWithThresholds = marketsWithPrices
+    .map(m => ({ ...m, threshold: extractThreshold(m.question), subject: extractSubject(m.question) }))
+    .filter(m => m.threshold && m.subject);
+
+  for (let i = 0; i < marketsWithThresholds.length; i++) {
+    for (let j = i + 1; j < marketsWithThresholds.length; j++) {
+      const a = marketsWithThresholds[i];
+      const b = marketsWithThresholds[j];
+
+      const similarity = subjectSimilarity(a.subject, b.subject);
+      if (similarity < 0.5) continue;
+
+      if (a.threshold.direction !== b.threshold.direction) continue;
+      if (Math.abs(a.threshold.value - b.threshold.value) < 0.01) continue;
+
+      let higher, lower;
+      if (a.threshold.direction === 'above') {
+        higher = a.threshold.value > b.threshold.value ? a : b;
+        lower = a.threshold.value > b.threshold.value ? b : a;
+      } else {
+        higher = a.threshold.value < b.threshold.value ? a : b;
+        lower = a.threshold.value < b.threshold.value ? b : a;
+      }
+
+      // Higher threshold should have lower or equal probability (for "above")
+      const violation = higher.price > lower.price + 0.01;
+      const profit = violation ? higher.price - lower.price : 0;
+      const fees = arbitrageConfig.feeRate * 4;
+      const profitAfterFees = profit - fees;
+
+      thresholdDeps.push({
+        type: 'threshold',
+        marketA: { id: higher.id, question: higher.question, price: higher.price },
+        marketB: { id: lower.id, question: lower.question, price: lower.price },
+        expectedRelation: 'A <= B',
+        reasoning: `Reaching ${higher.threshold.value} requires reaching ${lower.threshold.value} first`,
+        violation,
+        arbitrageProfit: profit,
+        profitAfterFees,
+        qualifies: profitAfterFees > 0,
+        reasons: violation
+          ? [`P(harder) ${higher.price.toFixed(3)} > P(easier) ${lower.price.toFixed(3)}`]
+          : ['No violation'],
+      });
+    }
+  }
+
+  const allDeps = [...temporalDeps, ...thresholdDeps];
+  const opportunities = allDeps.filter(d => d.qualifies);
+
+  return {
+    dependencies: allDeps,
+    opportunities,
+    stats: {
+      totalMarkets: markets.length,
+      temporalDependencies: temporalDeps.length,
+      thresholdDependencies: thresholdDeps.length,
+      violations: allDeps.filter(d => d.violation).length,
+      qualifyingOpportunities: opportunities.length,
+    },
+    timestamp: Date.now(),
+  };
+}
+
+// ============================================================================
 // START SERVER
 // ============================================================================
 
@@ -1582,6 +2785,12 @@ Promise.all([
   configPresets.initPresetsDatabase(),
 ]).then(() => {
   console.log('[DB] All databases initialized');
+
+  // Auto-run initial arbitrage scan after startup
+  setTimeout(() => {
+    console.log('[ARB-FW] Running initial multi-outcome arbitrage scan...');
+    runMultiOutcomeArbitrageScan();
+  }, 5000); // Wait 5s for everything to initialize
 }).catch(err => {
   console.error('[DB] Failed to initialize databases:', err);
 });
@@ -1601,6 +2810,12 @@ app.listen(PORT, () => {
 ║    GET /api/book/:tokenId          - Order book              ║
 ║    GET /api/price/:yes/:no         - Price tick              ║
 ║    GET /api/health                 - Health check            ║
+║                                                              ║
+║  Arbitrage Scanner:                                          ║
+║    GET /api/arbitrage/scan         - Scan all markets        ║
+║    GET /api/arbitrage/result       - Last scan results       ║
+║    GET /api/arbitrage/config       - Get scanner config      ║
+║   POST /api/arbitrage/config       - Update scanner config   ║
 ║                                                              ║
 ║  WebSocket Messages:                                         ║
 ║    → { action: 'subscribe', tokenIds: [...] }                ║

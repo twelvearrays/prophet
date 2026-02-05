@@ -291,6 +291,8 @@ export function useLiveData() {
   const pricesRef = useRef<Map<string, { yesPrice: number; noPrice: number; timestamp: number }>>(new Map())
   // Global price history per market (shared across strategies)
   const priceHistoryRef = useRef<Map<string, PriceTick[]>>(new Map())
+  // Track which markets have successfully loaded history (prevents repeated fetches)
+  const historyLoadedRef = useRef<Set<string>>(new Set())
   // Track if this specific hook instance has initialized
   const initializedRef = useRef(false)
 
@@ -1273,22 +1275,12 @@ export function useLiveData() {
 
       // Store in global history (shared across all sessions for this market)
       const existingHistory = priceHistoryRef.current.get(conditionId) || []
-      const newHistory = [...existingHistory.slice(-500), tick]
+      const newHistory = [...existingHistory.slice(-200), tick]
       priceHistoryRef.current.set(conditionId, newHistory)
-
-      // Debug: log history size periodically
-      if (newHistory.length % 50 === 0) {
-        console.log(`[PRICE] Market ${conditionId.slice(0, 10)}... now has ${newHistory.length} ticks`)
-      }
 
       setSessions(prev => prev.map(session => {
         if (session.marketId !== conditionId) return session
-        const updated = processSessionTick(session, tick, newHistory)
-        // Debug: log if priceHistory is being set
-        if (updated.priceHistory.length !== session.priceHistory.length) {
-          console.log(`[SESSION] ${session.asset} ${session.strategyType} priceHistory: ${session.priceHistory.length} -> ${updated.priceHistory.length}`)
-        }
-        return updated
+        return processSessionTick(session, tick, newHistory)
       }))
     }
   }, [processSessionTick])
@@ -1529,68 +1521,109 @@ export function useLiveData() {
             connectWebSocket(allTokenIds)
           }
 
-          // Also fetch initial prices AND price history for new markets via REST
-          setTimeout(async () => {
-            for (const m of newMarkets) {
-              try {
-                // Fetch saved price history from backend first
-                const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
-                let savedHistory: PriceTick[] = []
-                const sessionStart = m.startTime ? new Date(m.startTime).getTime() : Date.now()
-                const sessionEnd = new Date(m.endTime).getTime()
+          // Fetch initial prices AND price history for new markets via REST
+          // Use retry mechanism since backend may need time to accumulate data
+          const fetchHistoryWithRetry = async (market: CryptoMarket, retryCount = 0) => {
+            const maxRetries = 6 // Retry for up to 30 seconds (5s intervals)
+            const retryDelay = 5000 // 5 seconds between retries
 
-                if (historyRes.ok) {
-                  const historyData = await historyRes.json()
-                  if (historyData.ticks && historyData.ticks.length > 0) {
-                    // Filter to only include ticks within THIS session's time window
-                    savedHistory = historyData.ticks.filter((tick: PriceTick) =>
-                      tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
-                    )
-                    console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${m.asset} (filtered to session window)`)
+            try {
+              const sessionStart = market.startTime ? new Date(market.startTime).getTime() : Date.now()
+              const sessionEnd = new Date(market.endTime).getTime()
+
+              // Fetch saved price history from backend
+              const historyRes = await fetch(`${API_URL}/price-history/${market.conditionId}`)
+              let savedHistory: PriceTick[] = []
+
+              if (historyRes.ok) {
+                const historyData = await historyRes.json()
+                if (historyData.ticks && historyData.ticks.length > 0) {
+                  // Filter to only include ticks within THIS session's time window
+                  savedHistory = historyData.ticks.filter((tick: PriceTick) =>
+                    tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
+                  )
+                  if (savedHistory.length > 0) {
+                    console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${market.asset} (filtered to session window)`)
                   }
                 }
-
-                // Fetch current price
-                const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}?marketId=${m.conditionId}`)
-                if (priceRes.ok) {
-                  const priceData = await priceRes.json()
-                  console.log(`[LIVE] Got initial price for ${m.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
-
-                  // Store initial prices
-                  pricesRef.current.set(m.conditionId, {
-                    yesPrice: priceData.yesPrice,
-                    noPrice: priceData.noPrice,
-                    timestamp: Date.now()
-                  })
-
-                  // Create current tick
-                  const tick: PriceTick = {
-                    timestamp: Date.now(),
-                    yesPrice: priceData.yesPrice,
-                    noPrice: priceData.noPrice,
-                    yesLiquidity: priceData.yesLiquidity || 100,
-                    noLiquidity: priceData.noLiquidity || 100,
-                  }
-
-                  // Combine: existing accumulated history + saved history from backend + current tick
-                  const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
-                  const combinedHistory = [...existingHistory, ...savedHistory, tick]
-                    .filter((t, i, arr) => i === 0 || t.timestamp !== arr[i-1].timestamp) // dedupe by timestamp
-                    .slice(-500)
-                  priceHistoryRef.current.set(m.conditionId, combinedHistory)
-
-                  setSessions(prev => prev.map(session => {
-                    if (session.marketId !== m.conditionId) return session
-                    return {
-                      ...session,
-                      currentTick: tick,
-                      priceHistory: combinedHistory,
-                    }
-                  }))
-                }
-              } catch (e) {
-                console.log(`[LIVE] Failed to get initial price for ${m.asset}:`, e)
               }
+
+              // Fetch current price
+              const priceRes = await fetch(`${API_URL}/price/${market.yesTokenId}/${market.noTokenId}?marketId=${market.conditionId}`)
+              if (priceRes.ok) {
+                const priceData = await priceRes.json()
+
+                if (retryCount === 0) {
+                  console.log(`[LIVE] Got initial price for ${market.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
+                }
+
+                // Store initial prices
+                pricesRef.current.set(market.conditionId, {
+                  yesPrice: priceData.yesPrice,
+                  noPrice: priceData.noPrice,
+                  timestamp: Date.now()
+                })
+
+                // Create current tick
+                const tick: PriceTick = {
+                  timestamp: Date.now(),
+                  yesPrice: priceData.yesPrice,
+                  noPrice: priceData.noPrice,
+                  yesLiquidity: priceData.yesLiquidity || 100,
+                  noLiquidity: priceData.noLiquidity || 100,
+                }
+
+                // Combine: existing accumulated history + saved history from backend + current tick
+                const existingHistory = priceHistoryRef.current.get(market.conditionId) || []
+
+                // Merge and sort by timestamp, dedupe
+                const allTicks = [...existingHistory, ...savedHistory, tick]
+                  .sort((a, b) => a.timestamp - b.timestamp)
+                const combinedHistory = allTicks
+                  .filter((t, i, arr) => i === 0 || t.timestamp - arr[i-1].timestamp >= 400) // dedupe within 400ms
+                  .slice(-200)
+
+                priceHistoryRef.current.set(market.conditionId, combinedHistory)
+
+                setSessions(prev => prev.map(session => {
+                  if (session.marketId !== market.conditionId) return session
+                  return {
+                    ...session,
+                    currentTick: tick,
+                    priceHistory: combinedHistory,
+                  }
+                }))
+
+                // Calculate time span of history
+                if (combinedHistory.length >= 2) {
+                  const timeSpanSec = (combinedHistory[combinedHistory.length - 1].timestamp - combinedHistory[0].timestamp) / 1000
+
+                  // If we have at least 10 seconds of history, stop retrying
+                  if (timeSpanSec >= 10) {
+                    historyLoadedRef.current.add(market.conditionId)
+                    console.log(`[LIVE] ${market.asset} has ${combinedHistory.length} ticks spanning ${timeSpanSec.toFixed(0)}s - history loaded`)
+                    return // Done
+                  }
+                }
+
+                // If history is too short and we haven't exceeded retries, schedule another fetch
+                if (retryCount < maxRetries) {
+                  setTimeout(() => fetchHistoryWithRetry(market, retryCount + 1), retryDelay)
+                }
+              }
+            } catch (e) {
+              console.log(`[LIVE] Failed to get price for ${market.asset}:`, e)
+              // Retry on error
+              if (retryCount < maxRetries) {
+                setTimeout(() => fetchHistoryWithRetry(market, retryCount + 1), retryDelay)
+              }
+            }
+          }
+
+          // Start fetching for all new markets after a short delay
+          setTimeout(() => {
+            for (const m of newMarkets) {
+              fetchHistoryWithRetry(m)
             }
           }, 500)
         }
@@ -1627,68 +1660,100 @@ export function useLiveData() {
         connectWebSocket(tokenIds)
 
         // Fetch initial prices AND price history for all markets on initial load
-        setTimeout(async () => {
+        // Helper function with retry for loading history
+        const fetchMarketHistoryWithRetry = async (market: CryptoMarket, retryCount = 0) => {
+          const maxRetries = 6 // Retry for up to 30 seconds
+          const retryDelay = 5000
+
+          try {
+            const sessionStart = market.startTime ? new Date(market.startTime).getTime() : Date.now()
+            const sessionEnd = new Date(market.endTime).getTime()
+
+            // Fetch saved price history from backend
+            const historyRes = await fetch(`${API_URL}/price-history/${market.conditionId}`)
+            let savedHistory: PriceTick[] = []
+
+            if (historyRes.ok) {
+              const historyData = await historyRes.json()
+              if (historyData.ticks && historyData.ticks.length > 0) {
+                savedHistory = historyData.ticks.filter((tick: PriceTick) =>
+                  tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
+                )
+                if (savedHistory.length > 0) {
+                  console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${market.asset}`)
+                }
+              }
+            }
+
+            // Fetch current price
+            const priceRes = await fetch(`${API_URL}/price/${market.yesTokenId}/${market.noTokenId}?marketId=${market.conditionId}`)
+            if (priceRes.ok) {
+              const priceData = await priceRes.json()
+
+              if (retryCount === 0) {
+                console.log(`[LIVE] Initial price for ${market.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
+              }
+
+              pricesRef.current.set(market.conditionId, {
+                yesPrice: priceData.yesPrice,
+                noPrice: priceData.noPrice,
+                timestamp: Date.now()
+              })
+
+              const tick: PriceTick = {
+                timestamp: Date.now(),
+                yesPrice: priceData.yesPrice,
+                noPrice: priceData.noPrice,
+                yesLiquidity: priceData.yesLiquidity || 100,
+                noLiquidity: priceData.noLiquidity || 100,
+              }
+
+              // Merge and sort by timestamp
+              const existingHistory = priceHistoryRef.current.get(market.conditionId) || []
+              const allTicks = [...existingHistory, ...savedHistory, tick]
+                .sort((a, b) => a.timestamp - b.timestamp)
+              const combinedHistory = allTicks
+                .filter((t, i, arr) => i === 0 || t.timestamp - arr[i-1].timestamp >= 400)
+                .slice(-200)
+
+              priceHistoryRef.current.set(market.conditionId, combinedHistory)
+
+              setSessions(prev => prev.map(session => {
+                if (session.marketId !== market.conditionId) return session
+                return {
+                  ...session,
+                  currentTick: tick,
+                  priceHistory: combinedHistory,
+                }
+              }))
+
+              // Check if we have enough history
+              if (combinedHistory.length >= 2) {
+                const timeSpanSec = (combinedHistory[combinedHistory.length - 1].timestamp - combinedHistory[0].timestamp) / 1000
+                if (timeSpanSec >= 10) {
+                  historyLoadedRef.current.add(market.conditionId)
+                  console.log(`[LIVE] ${market.asset} has ${combinedHistory.length} ticks spanning ${timeSpanSec.toFixed(0)}s`)
+                  return
+                }
+              }
+
+              // Retry if history is too short
+              if (retryCount < maxRetries) {
+                setTimeout(() => fetchMarketHistoryWithRetry(market, retryCount + 1), retryDelay)
+              }
+            }
+          } catch (e) {
+            console.log(`[LIVE] Failed to get price for ${market.asset}:`, e)
+            if (retryCount < maxRetries) {
+              setTimeout(() => fetchMarketHistoryWithRetry(market, retryCount + 1), retryDelay)
+            }
+          }
+        }
+
+        setTimeout(() => {
           console.log(`[LIVE] Fetching initial prices and history for ${markets.length} markets...`)
           for (const m of markets) {
-            try {
-              // Fetch saved price history from backend first
-              const historyRes = await fetch(`${API_URL}/price-history/${m.conditionId}`)
-              let savedHistory: PriceTick[] = []
-              const sessionStart = m.startTime ? new Date(m.startTime).getTime() : Date.now()
-              const sessionEnd = new Date(m.endTime).getTime()
-
-              if (historyRes.ok) {
-                const historyData = await historyRes.json()
-                if (historyData.ticks && historyData.ticks.length > 0) {
-                  // Filter to only include ticks within THIS session's time window
-                  savedHistory = historyData.ticks.filter((tick: PriceTick) =>
-                    tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
-                  )
-                  console.log(`[LIVE] Loaded ${savedHistory.length}/${historyData.ticks.length} historical ticks for ${m.asset} (filtered to session window)`)
-                }
-              }
-
-              // Fetch current price
-              const priceRes = await fetch(`${API_URL}/price/${m.yesTokenId}/${m.noTokenId}?marketId=${m.conditionId}`)
-              if (priceRes.ok) {
-                const priceData = await priceRes.json()
-                console.log(`[LIVE] Initial price for ${m.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
-
-                pricesRef.current.set(m.conditionId, {
-                  yesPrice: priceData.yesPrice,
-                  noPrice: priceData.noPrice,
-                  timestamp: Date.now()
-                })
-
-                // Create current tick
-                const tick: PriceTick = {
-                  timestamp: Date.now(),
-                  yesPrice: priceData.yesPrice,
-                  noPrice: priceData.noPrice,
-                  yesLiquidity: priceData.yesLiquidity || 100,
-                  noLiquidity: priceData.noLiquidity || 100,
-                }
-
-                // Combine: existing accumulated history + saved history from backend + current tick
-                // Use existing history first (from WebSocket accumulation), then add any saved backend history, then current tick
-                const existingHistory = priceHistoryRef.current.get(m.conditionId) || []
-                const combinedHistory = [...existingHistory, ...savedHistory, tick]
-                  .filter((t, i, arr) => i === 0 || t.timestamp !== arr[i-1].timestamp) // dedupe by timestamp
-                  .slice(-500)
-                priceHistoryRef.current.set(m.conditionId, combinedHistory)
-
-                setSessions(prev => prev.map(session => {
-                  if (session.marketId !== m.conditionId) return session
-                  return {
-                    ...session,
-                    currentTick: tick,
-                    priceHistory: combinedHistory,
-                  }
-                }))
-              }
-            } catch (e) {
-              console.log(`[LIVE] Failed to get initial price for ${m.asset}:`, e)
-            }
+            fetchMarketHistoryWithRetry(m)
           }
         }, 1000)
       }
@@ -1800,17 +1865,48 @@ export function useLiveData() {
 
       for (const [conditionId, market] of marketsRef.current.entries()) {
         try {
-          // If we don't have history for this market yet, try to fetch it from backend
+          // If we have very little history and haven't loaded yet, try to fetch from backend
           let existingHistory = priceHistoryRef.current.get(conditionId) || []
-          if (existingHistory.length === 0) {
+          const timeSpan = existingHistory.length >= 2
+            ? existingHistory[existingHistory.length - 1].timestamp - existingHistory[0].timestamp
+            : 0
+
+          // Only fetch backend history if:
+          // 1. We have less than 10 seconds of data
+          // 2. We haven't already loaded history for this market
+          if (timeSpan < 10000 && !historyLoadedRef.current.has(conditionId)) {
             try {
               const historyRes = await fetch(`${API_URL}/price-history/${conditionId}`)
               if (historyRes.ok) {
                 const historyData = await historyRes.json()
                 if (historyData.ticks && historyData.ticks.length > 0) {
-                  existingHistory = historyData.ticks
-                  priceHistoryRef.current.set(conditionId, existingHistory)
-                  console.log(`[POLL] Loaded ${existingHistory.length} historical ticks for ${market.asset}`)
+                  // Filter to session window
+                  const sessionStart = market.startTime ? new Date(market.startTime).getTime() : Date.now() - 15 * 60 * 1000
+                  const sessionEnd = new Date(market.endTime).getTime()
+                  const filteredTicks = historyData.ticks.filter((tick: PriceTick) =>
+                    tick.timestamp >= sessionStart && tick.timestamp <= sessionEnd
+                  )
+
+                  if (filteredTicks.length > 0) {
+                    // Merge with existing history
+                    const merged = [...existingHistory, ...filteredTicks]
+                      .sort((a: PriceTick, b: PriceTick) => a.timestamp - b.timestamp)
+                      .filter((t: PriceTick, i: number, arr: PriceTick[]) => i === 0 || t.timestamp - arr[i-1].timestamp >= 400)
+                      .slice(-200)
+
+                    // Calculate merged time span
+                    const mergedTimeSpan = merged.length >= 2
+                      ? merged[merged.length - 1].timestamp - merged[0].timestamp
+                      : 0
+
+                    // Only update if we got meaningful data (>= 10 seconds of history)
+                    if (mergedTimeSpan >= 10000) {
+                      existingHistory = merged
+                      priceHistoryRef.current.set(conditionId, existingHistory)
+                      historyLoadedRef.current.add(conditionId)
+                      console.log(`[POLL] History loaded for ${market.asset}: ${existingHistory.length} ticks spanning ${(mergedTimeSpan / 1000).toFixed(0)}s`)
+                    }
+                  }
                 }
               }
             } catch {
@@ -1842,7 +1938,7 @@ export function useLiveData() {
 
           // Re-fetch existing history in case it was loaded above
           existingHistory = priceHistoryRef.current.get(conditionId) || []
-          const newHistory = [...existingHistory.slice(-500), tick]
+          const newHistory = [...existingHistory.slice(-200), tick]
           priceHistoryRef.current.set(conditionId, newHistory)
 
           // Update all sessions for this market AND run strategy logic
