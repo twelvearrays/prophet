@@ -8,6 +8,7 @@ import {
   YAxis,
   CartesianGrid,
   ReferenceLine,
+  ReferenceDot,
   ReferenceArea,
   ResponsiveContainer,
   Tooltip,
@@ -303,12 +304,16 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             isAnimationActive={false}
           />
 
-          {/* Fill markers */}
+          {/* Fill markers - visible dots at trade execution points */}
           {fills.map((fill, i) => (
-            <ReferenceLine
+            <ReferenceDot
               key={`fill-${i}`}
               x={fill.timestamp}
-              stroke="transparent"
+              y={fill.price}
+              r={5}
+              fill={fill.side === "YES" ? COLORS.yes : COLORS.no}
+              stroke="#000"
+              strokeWidth={1.5}
               ifOverflow="extendDomain"
             />
           ))}
