@@ -99,14 +99,15 @@ export function SessionDetail({ session }: SessionDetailProps) {
           {/* Compact Liquidity Display */}
           {session.currentTick && (
             <div className="mt-2 flex items-center gap-4 text-xs font-mono">
+              <span className="text-zinc-500">Liquidity:</span>
               <div className="flex items-center gap-1.5">
-                <span className="text-emerald-400">YES:</span>
+                <span className="text-emerald-400">YES</span>
                 <span className={session.currentTick.yesLiquidity >= 50 ? "text-zinc-300" : "text-amber-400"}>
                   ${session.currentTick.yesLiquidity.toFixed(0)}
                 </span>
               </div>
               <div className="flex items-center gap-1.5">
-                <span className="text-rose-400">NO:</span>
+                <span className="text-rose-400">NO</span>
                 <span className={session.currentTick.noLiquidity >= 50 ? "text-zinc-300" : "text-amber-400"}>
                   ${session.currentTick.noLiquidity.toFixed(0)}
                 </span>

@@ -46,13 +46,26 @@ function downsampleData(data: PriceTick[], maxPoints: number): PriceTick[] {
 
 const MAX_RENDER_POINTS = 150
 
-// Custom active dot (glowing current price)
+// Custom active dot (glowing current price - shown on hover)
 function GlowDot({ cx, cy, stroke }: { cx?: number; cy?: number; stroke?: string }) {
   if (cx == null || cy == null) return null
   return (
     <g>
       <circle cx={cx} cy={cy} r={8} fill={`${stroke}4D`} />
       <circle cx={cx} cy={cy} r={5} fill={stroke} />
+    </g>
+  )
+}
+
+// Dot that only renders on the LAST data point (current price marker)
+function LastPointDot({ cx, cy, stroke, index, dataLength }: {
+  cx?: number; cy?: number; stroke?: string; index?: number; dataLength: number
+}) {
+  if (cx == null || cy == null || index !== dataLength - 1) return null
+  return (
+    <g>
+      <circle cx={cx} cy={cy} r={6} fill={`${stroke}4D`} />
+      <circle cx={cx} cy={cy} r={3.5} fill={stroke} />
     </g>
   )
 }
@@ -274,7 +287,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             dataKey="yesPrice"
             stroke={COLORS.yes}
             strokeWidth={2.5}
-            dot={false}
+            dot={(props: any) => <LastPointDot {...props} dataLength={renderData.length} />}
             activeDot={<GlowDot />}
             isAnimationActive={false}
           />
@@ -285,7 +298,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             dataKey="noPrice"
             stroke={COLORS.no}
             strokeWidth={2.5}
-            dot={false}
+            dot={(props: any) => <LastPointDot {...props} dataLength={renderData.length} />}
             activeDot={<GlowDot />}
             isAnimationActive={false}
           />

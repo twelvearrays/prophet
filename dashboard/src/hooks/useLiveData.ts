@@ -288,7 +288,7 @@ export function useLiveData() {
 
   const marketsRef = useRef<Map<string, CryptoMarket>>(new Map())
   const wsRef = useRef<WebSocket | null>(null)
-  const pricesRef = useRef<Map<string, { yesPrice: number; noPrice: number; timestamp: number }>>(new Map())
+  const pricesRef = useRef<Map<string, { yesPrice: number; noPrice: number; yesLiquidity: number; noLiquidity: number; timestamp: number }>>(new Map())
   // Global price history per market (shared across strategies)
   const priceHistoryRef = useRef<Map<string, PriceTick[]>>(new Map())
   // Track which markets have successfully loaded history (prevents repeated fetches)
@@ -1260,25 +1260,25 @@ export function useLiveData() {
 
     // Find which market this token belongs to
     for (const [conditionId, market] of marketsRef.current.entries()) {
-      let priceData = pricesRef.current.get(conditionId) || { yesPrice: 0.5, noPrice: 0.5, timestamp: 0 }
+      let priceData = pricesRef.current.get(conditionId) || { yesPrice: 0.5, noPrice: 0.5, yesLiquidity: 0, noLiquidity: 0, timestamp: 0 }
 
       if (tokenId === market.yesTokenId) {
-        priceData = { ...priceData, yesPrice: bestAsk, timestamp: Date.now() }
+        priceData = { ...priceData, yesPrice: bestAsk, yesLiquidity: liquidity ?? priceData.yesLiquidity, timestamp: Date.now() }
         pricesRef.current.set(conditionId, priceData)
       } else if (tokenId === market.noTokenId) {
-        priceData = { ...priceData, noPrice: bestAsk, timestamp: Date.now() }
+        priceData = { ...priceData, noPrice: bestAsk, noLiquidity: liquidity ?? priceData.noLiquidity, timestamp: Date.now() }
         pricesRef.current.set(conditionId, priceData)
       } else {
         continue
       }
 
-      // Update session with new price
+      // Update session with new price - use tracked liquidity for both sides
       const tick: PriceTick = {
         timestamp: Date.now(),
         yesPrice: priceData.yesPrice,
         noPrice: priceData.noPrice,
-        yesLiquidity: liquidity || 100,
-        noLiquidity: 100,
+        yesLiquidity: priceData.yesLiquidity,
+        noLiquidity: priceData.noLiquidity,
       }
 
       // Store in global history - THROTTLED to prevent WS flooding
@@ -1574,10 +1574,12 @@ export function useLiveData() {
                   console.log(`[LIVE] Got initial price for ${market.asset}: YES=${(priceData.yesPrice * 100).toFixed(1)}¢, NO=${(priceData.noPrice * 100).toFixed(1)}¢`)
                 }
 
-                // Store initial prices
+                // Store initial prices (including liquidity)
                 pricesRef.current.set(market.conditionId, {
                   yesPrice: priceData.yesPrice,
                   noPrice: priceData.noPrice,
+                  yesLiquidity: priceData.yesLiquidity || 0,
+                  noLiquidity: priceData.noLiquidity || 0,
                   timestamp: Date.now()
                 })
 
@@ -1718,6 +1720,8 @@ export function useLiveData() {
               pricesRef.current.set(market.conditionId, {
                 yesPrice: priceData.yesPrice,
                 noPrice: priceData.noPrice,
+                yesLiquidity: priceData.yesLiquidity || 0,
+                noLiquidity: priceData.noLiquidity || 0,
                 timestamp: Date.now()
               })
 
@@ -1945,10 +1949,12 @@ export function useLiveData() {
 
           const priceData = await priceRes.json()
 
-          // Store in prices ref
+          // Store in prices ref (including liquidity from API)
           pricesRef.current.set(conditionId, {
             yesPrice: priceData.yesPrice,
             noPrice: priceData.noPrice,
+            yesLiquidity: priceData.yesLiquidity || 0,
+            noLiquidity: priceData.noLiquidity || 0,
             timestamp: Date.now()
           })
 
