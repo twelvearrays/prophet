@@ -46,33 +46,13 @@ function downsampleData(data: PriceTick[], maxPoints: number): PriceTick[] {
 
 const MAX_RENDER_POINTS = 150
 
-// Custom dot for fill markers (triangles)
-function FillMarker({ cx, cy, fill: fillData }: { cx: number; cy: number; fill: { side: "YES" | "NO"; type: string } }) {
-  const color = fillData.side === "YES" ? COLORS.yes : COLORS.no
-  return (
-    <g>
-      <polygon
-        points={`${cx},${cy - 8} ${cx - 6},${cy + 4} ${cx + 6},${cy + 4}`}
-        fill={color}
-        stroke="#000"
-        strokeWidth={1}
-      />
-      {fillData.type === "HEDGE" && (
-        <text x={cx} y={cy - 12} textAnchor="middle" fill={COLORS.amber} fontSize={8} fontWeight="bold" fontFamily="'Outfit', sans-serif">
-          H
-        </text>
-      )}
-    </g>
-  )
-}
-
 // Custom active dot (glowing current price)
 function GlowDot({ cx, cy, stroke }: { cx?: number; cy?: number; stroke?: string }) {
   if (cx == null || cy == null) return null
   return (
     <g>
-      <circle cx={cx} cy={cy} r={10} fill={`${stroke}4D`} />
-      <circle cx={cx} cy={cy} r={6} fill={stroke} />
+      <circle cx={cx} cy={cy} r={8} fill={`${stroke}4D`} />
+      <circle cx={cx} cy={cy} r={5} fill={stroke} />
     </g>
   )
 }
@@ -95,6 +75,44 @@ function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{
   )
 }
 
+// Custom Y-axis tick that shows colored badges for current prices
+function PriceTick({ x, y, payload, currentYesPrice, currentNoPrice }: {
+  x: number; y: number; payload: { value: number };
+  currentYesPrice: number; currentNoPrice: number;
+}) {
+  const value = payload.value
+  const label = `${Math.round(value * 100)}¢`
+
+  // Check if this tick is near the current YES or NO price
+  const isNearYes = Math.abs(value - currentYesPrice) < 0.02
+  const isNearNo = Math.abs(value - currentNoPrice) < 0.02
+
+  if (isNearYes || isNearNo) {
+    // Don't render static tick if current price is nearby — the ReferenceLine label handles it
+    return null
+  }
+
+  return (
+    <text x={x} y={y} dy={4} textAnchor="start" fill={COLORS.zinc} fontSize={11} fontFamily="'JetBrains Mono', monospace">
+      {label}
+    </text>
+  )
+}
+
+// Price label component for ReferenceLine
+function PriceLabel({ viewBox, value, color }: { viewBox?: { x: number; y: number; width: number }; value: string; color: string }) {
+  if (!viewBox) return null
+  const { y, width, x } = viewBox
+  return (
+    <g>
+      <rect x={x + width + 4} y={y - 10} width={50} height={20} rx={3} fill={color} />
+      <text x={x + width + 8} y={y + 4} fill="#000" fontSize={11} fontWeight="bold" fontFamily="'JetBrains Mono', monospace">
+        {value}
+      </text>
+    </g>
+  )
+}
+
 export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime, endTime, fills = [] }: PriceChartProps) {
   // Chart-side accumulation: never let rendered data shrink
   const accumulatedRef = useRef<PriceTick[]>([])
@@ -113,60 +131,45 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   const sessionStart = startTime || (chartData[0]?.timestamp || currentTime)
   const sessionEnd = endTime || (sessionStart + 15 * 60 * 1000)
 
-  // Build render data with downsampling
   const renderData = useMemo(() => downsampleData(chartData, MAX_RENDER_POINTS), [chartData])
 
-  // Current prices for the legend
   const currentYesPrice = chartData.length > 0 ? chartData[chartData.length - 1].yesPrice : 0
   const currentNoPrice = chartData.length > 0 ? chartData[chartData.length - 1].noPrice : 0
 
   if (chartData.length === 0) {
     return (
-      <div className="w-full h-full flex items-center justify-center text-zinc-500 font-outfit text-sm">
+      <div className="w-full h-full flex items-center justify-center text-zinc-500 text-sm">
         Waiting for price data...
       </div>
     )
   }
 
-  // X-axis ticks: start, mid, end
-  const midTime = sessionStart + (sessionEnd - sessionStart) / 2
-  const xTicks = [sessionStart, midTime, sessionEnd]
+  // Generate 5 evenly spaced time ticks
+  const duration = sessionEnd - sessionStart
+  const xTicks = [
+    sessionStart,
+    sessionStart + duration * 0.25,
+    sessionStart + duration * 0.5,
+    sessionStart + duration * 0.75,
+    sessionEnd,
+  ]
 
   return (
-    <div className="w-full h-full relative">
-      {/* Legend bar */}
-      <div className="absolute top-0 left-2 z-10 flex items-center gap-4 text-[11px] font-bold" style={{ fontFamily: "'Outfit', sans-serif" }}>
+    <div className="w-full h-full">
+      {/* Legend */}
+      <div className="flex items-center gap-3 px-1 pb-1 text-[11px] font-bold" style={{ fontFamily: "'Outfit', sans-serif" }}>
         <span style={{ color: COLORS.yes }}>● YES</span>
         <span style={{ color: COLORS.no }}>● NO</span>
         <span className="font-normal" style={{ color: COLORS.amber }}>Entry: {formatPrice(threshold)}</span>
         {entryPrice && entrySide && (
           <span style={{ color: entrySide === "YES" ? COLORS.yes : COLORS.no }}>
-            Position: {entrySide} @ {formatPrice(entryPrice)}
+            Pos: {entrySide} @ {formatPrice(entryPrice)}
           </span>
         )}
       </div>
 
-      {/* Zone labels */}
-      <div className="absolute top-[30px] right-[65px] z-10 text-[11px] font-bold opacity-70" style={{ color: COLORS.yes, fontFamily: "'Outfit', sans-serif" }}>
-        ▲ UP wins
-      </div>
-      <div className="absolute bottom-[28px] right-[65px] z-10 text-[11px] font-bold opacity-70" style={{ color: COLORS.no, fontFamily: "'Outfit', sans-serif" }}>
-        ▼ DOWN wins
-      </div>
-
-      {/* Current price badges */}
-      <div className="absolute right-1 z-10 flex flex-col gap-1" style={{ top: "30px" }}>
-        <div className="rounded px-1.5 py-0.5 text-[11px] font-bold font-mono text-black" style={{ backgroundColor: COLORS.yes }}>
-          {formatPrice(currentYesPrice)}
-        </div>
-        <div className="rounded px-1.5 py-0.5 text-[11px] font-bold font-mono text-black" style={{ backgroundColor: COLORS.no }}>
-          {formatPrice(currentNoPrice)}
-        </div>
-      </div>
-
-      <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={renderData} margin={{ top: 28, right: 60, bottom: 20, left: 8 }}>
-          {/* Background zones via ReferenceArea */}
+      <ResponsiveContainer width="100%" height="90%">
+        <LineChart data={renderData} margin={{ top: 4, right: 58, bottom: 4, left: 4 }}>
           <defs>
             <linearGradient id="yesZone" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor={COLORS.yes} stopOpacity={0.12} />
@@ -178,15 +181,16 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             </linearGradient>
           </defs>
 
-          <ReferenceArea y1={0.5} y2={1.0} fill="url(#yesZone)" />
-          <ReferenceArea y1={0.0} y2={0.5} fill="url(#noZone)" />
+          {/* Background zones */}
+          <ReferenceArea y1={0.5} y2={1.0} fill="url(#yesZone)" ifOverflow="extendDomain" />
+          <ReferenceArea y1={0.0} y2={0.5} fill="url(#noZone)" ifOverflow="extendDomain" />
 
-          {/* Future area (after NOW) */}
+          {/* Future area (dimmed after NOW) */}
           {currentTime < sessionEnd && (
-            <ReferenceArea x1={currentTime} x2={sessionEnd} fill="rgba(39, 39, 42, 0.5)" />
+            <ReferenceArea x1={currentTime} x2={sessionEnd} fill="rgba(39, 39, 42, 0.5)" ifOverflow="extendDomain" />
           )}
 
-          <CartesianGrid stroke={COLORS.grid} strokeDasharray="" vertical={false} />
+          <CartesianGrid stroke={COLORS.grid} vertical={false} />
 
           <XAxis
             dataKey="timestamp"
@@ -197,6 +201,8 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             stroke="transparent"
             tick={{ fill: COLORS.zinc, fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
             tickLine={false}
+            axisLine={false}
+            allowDataOverflow
           />
 
           <YAxis
@@ -205,13 +211,17 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             tickFormatter={(v: number) => `${Math.round(v * 100)}¢`}
             orientation="right"
             stroke="transparent"
-            tick={{ fill: COLORS.zinc, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}
+            tick={(props: any) => (
+              <PriceTick {...props} currentYesPrice={currentYesPrice} currentNoPrice={currentNoPrice} />
+            )}
             tickLine={false}
-            width={55}
+            axisLine={false}
+            width={50}
+            allowDataOverflow
           />
 
           {/* 50¢ midline */}
-          <ReferenceLine y={0.5} stroke={COLORS.midline} strokeWidth={2} strokeDasharray="8 4" />
+          <ReferenceLine y={0.5} stroke={COLORS.midline} strokeWidth={1.5} strokeDasharray="8 4" />
 
           {/* Entry threshold */}
           <ReferenceLine y={threshold} stroke={COLORS.amber} strokeWidth={1} strokeDasharray="4 4" />
@@ -226,6 +236,24 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             />
           )}
 
+          {/* Current YES price line with badge */}
+          <ReferenceLine
+            y={currentYesPrice}
+            stroke={COLORS.yes}
+            strokeWidth={0.5}
+            strokeDasharray="2 3"
+            label={(props: any) => <PriceLabel {...props} value={formatPrice(currentYesPrice)} color={COLORS.yes} />}
+          />
+
+          {/* Current NO price line with badge */}
+          <ReferenceLine
+            y={currentNoPrice}
+            stroke={COLORS.no}
+            strokeWidth={0.5}
+            strokeDasharray="2 3"
+            label={(props: any) => <PriceLabel {...props} value={formatPrice(currentNoPrice)} color={COLORS.no} />}
+          />
+
           {/* NOW line */}
           {currentTime > sessionStart && currentTime < sessionEnd && (
             <ReferenceLine
@@ -233,7 +261,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
               stroke={COLORS.cyan}
               strokeWidth={1}
               strokeDasharray="4 4"
-              label={{ value: "NOW", position: "insideBottomLeft", fill: COLORS.cyan, fontSize: 9, fontWeight: "bold" }}
+              label={{ value: "NOW", position: "insideBottom", fill: COLORS.cyan, fontSize: 9, fontWeight: "bold" }}
             />
           )}
 
@@ -261,18 +289,13 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             isAnimationActive={false}
           />
 
-          {/* Fill markers as reference dots */}
+          {/* Fill markers */}
           {fills.map((fill, i) => (
             <ReferenceLine
-              key={i}
+              key={`fill-${i}`}
               x={fill.timestamp}
               stroke="transparent"
-              label={({ viewBox }: { viewBox: { x: number; y: number } }) => {
-                // Calculate y position from price
-                const chartHeight = 250 - 28 - 20 // approx from margins
-                const cy = 28 + (1 - fill.price) * chartHeight
-                return <FillMarker cx={viewBox.x} cy={cy} fill={fill} />
-              }}
+              ifOverflow="extendDomain"
             />
           ))}
         </LineChart>
