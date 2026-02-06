@@ -2059,7 +2059,17 @@ export function useLiveData() {
     }))
   }, [sessions, persistedStats])
 
-  const selectedSession = sessions.find(s => s.id === selectedSessionId) || null
+  // Auto-select first momentum session if current selection is invalid
+  const selectedSession = useMemo(() => {
+    const found = sessions.find(s => s.id === selectedSessionId)
+    if (found) return found
+    // Fallback: pick the first momentum session
+    const firstMom = sessions.find(s => s.strategyType === 'MOMENTUM')
+    if (firstMom && firstMom.id !== selectedSessionId) {
+      setSelectedSessionId(firstMom.id)
+    }
+    return firstMom || null
+  }, [sessions, selectedSessionId])
 
   // Strategy switcher - updates future sessions
   const switchStrategy = useCallback((strategy: StrategyType) => {
