@@ -1,4 +1,4 @@
-import { useRef, useMemo } from "react"
+import { useMemo } from "react"
 import type { PriceTick } from "@/types"
 import { formatPrice } from "@/lib/utils"
 import {
@@ -113,29 +113,17 @@ function PriceLabel({ viewBox, value, color }: { viewBox?: { x: number; y: numbe
   )
 }
 
-export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime: _startTime, endTime, fills = [] }: PriceChartProps) {
-  // Chart-side accumulation: never let rendered data shrink
-  const accumulatedRef = useRef<PriceTick[]>([])
-  if (data.length >= accumulatedRef.current.length) {
-    accumulatedRef.current = data
-  } else if (data.length > 0) {
-    const lastTick = data[data.length - 1]
-    const lastAccTs = accumulatedRef.current[accumulatedRef.current.length - 1]?.timestamp || 0
-    if (lastTick.timestamp > lastAccTs) {
-      accumulatedRef.current = [...accumulatedRef.current, lastTick].slice(-200)
-    }
-  }
-  const chartData = accumulatedRef.current.length > 0 ? accumulatedRef.current : data
-
+export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime, endTime, fills = [] }: PriceChartProps) {
+  // Use data directly - processSessionTick already guards against shrinking
   const currentTime = Date.now()
   const sessionEnd = endTime || (currentTime + 15 * 60 * 1000)
 
-  const renderData = useMemo(() => downsampleData(chartData, MAX_RENDER_POINTS), [chartData])
+  const renderData = useMemo(() => downsampleData(data, MAX_RENDER_POINTS), [data])
 
-  const currentYesPrice = chartData.length > 0 ? chartData[chartData.length - 1].yesPrice : 0
-  const currentNoPrice = chartData.length > 0 ? chartData[chartData.length - 1].noPrice : 0
+  const currentYesPrice = data.length > 0 ? data[data.length - 1].yesPrice : 0
+  const currentNoPrice = data.length > 0 ? data[data.length - 1].noPrice : 0
 
-  if (chartData.length === 0) {
+  if (data.length === 0) {
     return (
       <div className="w-full h-full flex items-center justify-center text-zinc-500 text-sm">
         Waiting for price data...
@@ -143,11 +131,17 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     )
   }
 
-  // X-axis domain: start from first data point, end at session end
-  // This ensures data always fills the left side of the chart and grows rightward
-  const dataStart = chartData[0].timestamp
-  const xDomainStart = dataStart
-  const xDomainEnd = sessionEnd
+  // Data time span for diagnostics
+  const dataStart = data[0].timestamp
+  const dataEnd = data[data.length - 1].timestamp
+  const dataSpanSec = Math.round((dataEnd - dataStart) / 1000)
+
+  // X-axis domain: rolling window that keeps data filling most of the chart
+  // Start: first data point (includes historical data from backend)
+  // End: current time + 2 min buffer (capped at session end)
+  // This ensures the price line fills ~70-80% of chart width and visibly moves
+  const xDomainStart = startTime ? Math.min(startTime, dataStart) : dataStart
+  const xDomainEnd = Math.min(currentTime + 2 * 60 * 1000, sessionEnd)
 
   // Generate 4 evenly spaced time ticks
   const duration = xDomainEnd - xDomainStart
@@ -170,6 +164,9 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             Pos: {entrySide} @ {formatPrice(entryPrice)}
           </span>
         )}
+        <span className="ml-auto font-normal text-zinc-600 font-mono text-[10px]">
+          {data.length}pts {dataSpanSec}s
+        </span>
       </div>
 
       <ResponsiveContainer width="100%" height="90%">
@@ -190,8 +187,8 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
           <ReferenceArea y1={0.0} y2={0.5} fill="url(#noZone)" ifOverflow="extendDomain" />
 
           {/* Future area (dimmed after NOW) */}
-          {currentTime < sessionEnd && (
-            <ReferenceArea x1={currentTime} x2={sessionEnd} fill="rgba(39, 39, 42, 0.5)" ifOverflow="extendDomain" />
+          {currentTime < xDomainEnd && (
+            <ReferenceArea x1={currentTime} x2={xDomainEnd} fill="rgba(39, 39, 42, 0.5)" ifOverflow="extendDomain" />
           )}
 
           <CartesianGrid stroke={COLORS.grid} vertical={false} />
@@ -259,7 +256,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
           />
 
           {/* NOW line */}
-          {currentTime > xDomainStart && currentTime < sessionEnd && (
+          {currentTime > xDomainStart && currentTime < xDomainEnd && (
             <ReferenceLine
               x={currentTime}
               stroke={COLORS.cyan}
