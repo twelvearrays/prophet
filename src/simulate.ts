@@ -95,6 +95,28 @@ async function main() {
 
   printStats(aggressiveStats, 'AGGRESSIVE CONFIG (60¢ entry, 15pt hedge)');
 
+  // Choppy market test - higher volatility, lower momentum
+  console.log('Running with choppy market simulator...\n');
+  const choppySimulator = new Simulator({ volatility: 0.05, momentumFactor: 0.3 });
+
+  const { stats: choppyDefaultStats } = choppySimulator.runMany(
+    () => new StrategyEngine(),
+    numSimulations
+  );
+  printStats(choppyDefaultStats, 'CHOPPY MARKET - Default config (with whipsaw filters)');
+
+  const { stats: choppyNoFilterStats } = choppySimulator.runMany(
+    () => new StrategyEngine({
+      confirmationTicks: 0,
+      volatilityWindow: 0,
+      maxVolatilityRange: 1.0,
+      momentumLookback: 0,
+      hedgeGraceTicks: 0,
+    }),
+    numSimulations
+  );
+  printStats(choppyNoFilterStats, 'CHOPPY MARKET - No whipsaw filters');
+
   // Summary comparison
   console.log('\n📋 COMPARISON SUMMARY');
   console.log('━'.repeat(70));
@@ -103,6 +125,8 @@ async function main() {
   console.log(`Default (65¢)       | ${defaultStats.entryRate.toFixed(1).padStart(9)}% | ${defaultStats.winRate.toFixed(1).padStart(7)}% | $${defaultStats.avgPnL.toFixed(2).padStart(6)} | ${defaultStats.sharpe.toFixed(2)}`);
   console.log(`Conservative (70¢)  | ${conservativeStats.entryRate.toFixed(1).padStart(9)}% | ${conservativeStats.winRate.toFixed(1).padStart(7)}% | $${conservativeStats.avgPnL.toFixed(2).padStart(6)} | ${conservativeStats.sharpe.toFixed(2)}`);
   console.log(`Aggressive (60¢)    | ${aggressiveStats.entryRate.toFixed(1).padStart(9)}% | ${aggressiveStats.winRate.toFixed(1).padStart(7)}% | $${aggressiveStats.avgPnL.toFixed(2).padStart(6)} | ${aggressiveStats.sharpe.toFixed(2)}`);
+  console.log(`Choppy + Filters    | ${choppyDefaultStats.entryRate.toFixed(1).padStart(9)}% | ${choppyDefaultStats.winRate.toFixed(1).padStart(7)}% | $${choppyDefaultStats.avgPnL.toFixed(2).padStart(6)} | ${choppyDefaultStats.sharpe.toFixed(2)}`);
+  console.log(`Choppy - No Filter  | ${choppyNoFilterStats.entryRate.toFixed(1).padStart(9)}% | ${choppyNoFilterStats.winRate.toFixed(1).padStart(7)}% | $${choppyNoFilterStats.avgPnL.toFixed(2).padStart(6)} | ${choppyNoFilterStats.sharpe.toFixed(2)}`);
   console.log('━'.repeat(70));
 }
 

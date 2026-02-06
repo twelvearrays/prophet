@@ -44,6 +44,13 @@ export interface StrategyConfig {
   // Late game adjustments
   lateGameMinutes: number;        // Minutes before close considered "late game"
   lateGameMinPrice: number;       // Minimum price to enter in late game
+
+  // Whipsaw protection
+  confirmationTicks: number;      // Consecutive ticks above threshold before entry
+  volatilityWindow: number;       // Number of ticks for rolling volatility check
+  maxVolatilityRange: number;     // Max price range in window before rejecting entry
+  momentumLookback: number;       // Ticks to look back for directional momentum
+  hedgeGraceTicks: number;        // Ticks after entry before hedge can trigger
 }
 
 /**
@@ -63,6 +70,11 @@ export const DEFAULT_STRATEGY_CONFIG: StrategyConfig = {
   maxHedges: 3,
   lateGameMinutes: 3,
   lateGameMinPrice: 0.85,
+  confirmationTicks: 3,
+  volatilityWindow: 15,
+  maxVolatilityRange: 0.10,
+  momentumLookback: 10,
+  hedgeGraceTicks: 15,
 };
 
 /**

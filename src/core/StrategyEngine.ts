@@ -27,6 +27,12 @@ export class StrategyEngine {
   private session: TradingSession | null = null;
   private eventHandlers: ((event: StrategyEvent) => void)[] = [];
 
+  // Whipsaw protection state
+  private priceHistory: PriceTick[] = [];
+  private ticksSinceEntry: number = 0;
+  private consecutiveAbove: number = 0;
+  private confirmingSide: Side | null = null;
+
   constructor(config: Partial<StrategyConfig> = {}) {
     this.config = { ...DEFAULT_STRATEGY_CONFIG, ...config };
   }
@@ -59,6 +65,12 @@ export class StrategyEngine {
       finalPnL: null,
     };
 
+    // Reset whipsaw protection state
+    this.priceHistory = [];
+    this.ticksSinceEntry = 0;
+    this.consecutiveAbove = 0;
+    this.confirmingSide = null;
+
     this.emit({ type: 'SESSION_START', session: this.session });
     return this.session;
   }
@@ -72,6 +84,18 @@ export class StrategyEngine {
     }
 
     this.emit({ type: 'PRICE_UPDATE', tick, session: this.session });
+
+    // Update price history buffer for volatility/momentum filters
+    this.priceHistory.push(tick);
+    const maxWindow = Math.max(this.config.volatilityWindow, this.config.momentumLookback, 1);
+    if (this.priceHistory.length > maxWindow) {
+      this.priceHistory = this.priceHistory.slice(-maxWindow);
+    }
+
+    // Track ticks since entry for hedge grace period
+    if (this.session.state === 'ENTERED') {
+      this.ticksSinceEntry++;
+    }
 
     const timeRemaining = (this.session.endTime - tick.timestamp) / 60000; // minutes
     const evaluation = this.evaluate(tick, timeRemaining);
@@ -188,6 +212,26 @@ export class StrategyEngine {
       }
     }
 
+    // Update confirmation counter for whipsaw filter
+    if (session.state === 'WAITING') {
+      let activeSide: Side | null = null;
+      if (tick.yesPrice >= effectiveThreshold) {
+        activeSide = 'YES';
+      } else if (tick.noPrice >= effectiveThreshold) {
+        activeSide = 'NO';
+      }
+
+      if (activeSide && activeSide === this.confirmingSide) {
+        this.consecutiveAbove++;
+      } else if (activeSide) {
+        this.confirmingSide = activeSide;
+        this.consecutiveAbove = 1;
+      } else {
+        this.confirmingSide = null;
+        this.consecutiveAbove = 0;
+      }
+    }
+
     // Check for entry opportunity
     if (session.state === 'WAITING' && session.remainingBudget > 5) {
       const entryAction = this.checkEntry(tick, effectiveThreshold);
@@ -214,6 +258,31 @@ export class StrategyEngine {
 
   private checkEntry(tick: PriceTick, threshold: number): StrategyAction | null {
     const session = this.session!;
+
+    // Filter 1: Confirmation ticks - require consecutive ticks above threshold
+    if (this.config.confirmationTicks > 0 && this.consecutiveAbove < this.config.confirmationTicks) {
+      return null;
+    }
+
+    // Filter 2: Rolling volatility gate - reject if market is too choppy
+    if (this.config.volatilityWindow > 0 && this.priceHistory.length >= this.config.volatilityWindow) {
+      const window = this.priceHistory.slice(-this.config.volatilityWindow);
+      const prices = window.map(t => t.yesPrice);
+      const range = Math.max(...prices) - Math.min(...prices);
+      if (range > this.config.maxVolatilityRange) {
+        return null;
+      }
+    }
+
+    // Filter 3: Directional momentum - only check the side that would be entered
+    if (this.config.momentumLookback > 1 && this.priceHistory.length >= this.config.momentumLookback) {
+      const lookbackTick = this.priceHistory[this.priceHistory.length - this.config.momentumLookback];
+      if (tick.yesPrice >= threshold && tick.yesPrice <= lookbackTick.yesPrice) {
+        return null; // YES not trending up
+      } else if (tick.noPrice >= threshold && tick.noPrice <= lookbackTick.noPrice) {
+        return null; // NO not trending up
+      }
+    }
 
     // Check YES entry
     if (tick.yesPrice >= threshold) {
@@ -305,6 +374,11 @@ export class StrategyEngine {
       return null;
     }
 
+    // Filter 4: Hedge grace period - don't hedge immediately after entry/scale
+    if (this.ticksSinceEntry < this.config.hedgeGraceTicks) {
+      return null;
+    }
+
     const currentPrice = position.side === 'YES' ? tick.yesPrice : tick.noPrice;
     const dropFromEntry = session.lastEntryPrice - currentPrice;
 
@@ -367,6 +441,7 @@ export class StrategyEngine {
       session.entryCount++;
       session.remainingBudget -= fill.cost;
       session.state = 'ENTERED';
+      this.ticksSinceEntry = 0; // Reset grace period on entry/scale
     } else if (action.type === 'HEDGE') {
       this.recordHedge(fill);
     }
@@ -426,6 +501,9 @@ export class StrategyEngine {
       session.state = 'WAITING';
       session.entryCount = 0;
       session.lastEntryPrice = null;
+      // Reset whipsaw confirmation state to force fresh confirmation at new threshold
+      this.consecutiveAbove = 0;
+      this.confirmingSide = null;
     } else {
       session.state = 'HEDGED';
       session.remainingBudget = 0;
