@@ -304,17 +304,24 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
             isAnimationActive={false}
           />
 
-          {/* Fill markers - visible dots at trade execution points */}
+          {/* Fill markers - triangles at trade execution points */}
           {fills.map((fill, i) => (
             <ReferenceDot
               key={`fill-${i}`}
               x={fill.timestamp}
               y={fill.price}
-              r={5}
-              fill={fill.side === "YES" ? COLORS.yes : COLORS.no}
-              stroke="#000"
-              strokeWidth={1.5}
+              r={0}
               ifOverflow="extendDomain"
+              shape={({ cx, cy }: { cx?: number; cy?: number }) => {
+                if (cx == null || cy == null) return null
+                const color = fill.side === "YES" ? COLORS.yes : COLORS.no
+                const isYes = fill.side === "YES"
+                // Up triangle for YES, down triangle for NO
+                const d = isYes
+                  ? `M${cx},${cy - 7} L${cx + 6},${cy + 5} L${cx - 6},${cy + 5} Z`
+                  : `M${cx},${cy + 7} L${cx + 6},${cy - 5} L${cx - 6},${cy - 5} Z`
+                return <path d={d} fill={color} stroke="#000" strokeWidth={1.5} />
+              }}
             />
           ))}
         </LineChart>

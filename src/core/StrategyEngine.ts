@@ -501,9 +501,10 @@ export class StrategyEngine {
       session.state = 'WAITING';
       session.entryCount = 0;
       session.lastEntryPrice = null;
-      // Reset whipsaw confirmation state to force fresh confirmation at new threshold
+      // Reset whipsaw state — stale volatility from the hedge swing would block re-entry
       this.consecutiveAbove = 0;
       this.confirmingSide = null;
+      this.priceHistory = [];
     } else {
       session.state = 'HEDGED';
       session.remainingBudget = 0;
