@@ -1027,10 +1027,16 @@ export function useLiveData() {
       )
     }
 
+    // Never replace history with fewer ticks than we already have
+    // (guards against polling starting before initial history fetch completes)
+    const mergedHistory = newHistory.length >= session.priceHistory.length
+      ? newHistory
+      : [...session.priceHistory.slice(-199), tick]
+
     let updated: TradingSession = {
       ...session,
       currentTick: tick,
-      priceHistory: newHistory,
+      priceHistory: mergedHistory,
     }
 
     // Update position current price
