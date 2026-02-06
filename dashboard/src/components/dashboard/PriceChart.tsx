@@ -1,6 +1,17 @@
-import { useEffect, useRef, useState } from "react"
+import { useRef, useMemo } from "react"
 import type { PriceTick } from "@/types"
 import { formatPrice } from "@/lib/utils"
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  ReferenceLine,
+  ReferenceArea,
+  ResponsiveContainer,
+  Tooltip,
+} from "recharts"
 
 interface PriceChartProps {
   data: PriceTick[]
@@ -12,40 +23,79 @@ interface PriceChartProps {
   fills?: Array<{ timestamp: number; price: number; side: "YES" | "NO"; type: string }>
 }
 
+const COLORS = {
+  yes: "#34d399",
+  no: "#fb7185",
+  cyan: "#22d3ee",
+  amber: "#fbbf24",
+  zinc: "#71717a",
+  midline: "#a1a1aa",
+  grid: "#27272a",
+}
+
 function downsampleData(data: PriceTick[], maxPoints: number): PriceTick[] {
   if (data.length <= maxPoints) return data
-
   const result: PriceTick[] = []
   const step = (data.length - 1) / (maxPoints - 1)
-
   for (let i = 0; i < maxPoints; i++) {
     const idx = Math.min(Math.round(i * step), data.length - 1)
     result.push(data[idx])
   }
-
   return result
 }
 
-const COLORS = {
-  yes: "#34d399",
-  yesBg: "rgba(52, 211, 153, 0.2)",
-  no: "#fb7185",
-  noBg: "rgba(251, 113, 133, 0.2)",
-  cyan: "#22d3ee",
-  amber: "#fbbf24",
-  zinc: "#71717a",
-  zincDark: "#52525b",
-  grid: "#27272a",
-  midline: "#a1a1aa",
+const MAX_RENDER_POINTS = 150
+
+// Custom dot for fill markers (triangles)
+function FillMarker({ cx, cy, fill: fillData }: { cx: number; cy: number; fill: { side: "YES" | "NO"; type: string } }) {
+  const color = fillData.side === "YES" ? COLORS.yes : COLORS.no
+  return (
+    <g>
+      <polygon
+        points={`${cx},${cy - 8} ${cx - 6},${cy + 4} ${cx + 6},${cy + 4}`}
+        fill={color}
+        stroke="#000"
+        strokeWidth={1}
+      />
+      {fillData.type === "HEDGE" && (
+        <text x={cx} y={cy - 12} textAnchor="middle" fill={COLORS.amber} fontSize={8} fontWeight="bold" fontFamily="'Outfit', sans-serif">
+          H
+        </text>
+      )}
+    </g>
+  )
 }
 
-const MAX_RENDER_POINTS = 100
+// Custom active dot (glowing current price)
+function GlowDot({ cx, cy, stroke }: { cx?: number; cy?: number; stroke?: string }) {
+  if (cx == null || cy == null) return null
+  return (
+    <g>
+      <circle cx={cx} cy={cy} r={10} fill={`${stroke}4D`} />
+      <circle cx={cx} cy={cy} r={6} fill={stroke} />
+    </g>
+  )
+}
+
+// Format timestamp for x-axis
+function formatTime(ts: number) {
+  return new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+}
+
+// Custom tooltip
+function ChartTooltip({ active, payload }: { active?: boolean; payload?: Array<{ value: number; dataKey: string }> }) {
+  if (!active || !payload?.length) return null
+  const yes = payload.find(p => p.dataKey === "yesPrice")
+  const no = payload.find(p => p.dataKey === "noPrice")
+  return (
+    <div className="bg-zinc-900/95 border border-zinc-700 rounded px-2.5 py-1.5 text-xs font-mono shadow-lg">
+      {yes && <div style={{ color: COLORS.yes }}>YES: {formatPrice(yes.value)}</div>}
+      {no && <div style={{ color: COLORS.no }}>NO: {formatPrice(no.value)}</div>}
+    </div>
+  )
+}
 
 export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime, endTime, fills = [] }: PriceChartProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null)
-  const containerRef = useRef<HTMLDivElement>(null)
-  const [dims, setDims] = useState({ width: 0, height: 0 })
-
   // Chart-side accumulation: never let rendered data shrink
   const accumulatedRef = useRef<PriceTick[]>([])
   if (data.length >= accumulatedRef.current.length) {
@@ -59,353 +109,174 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   }
   const chartData = accumulatedRef.current.length > 0 ? accumulatedRef.current : data
 
-  // ResizeObserver updates dimensions via state (triggers re-render)
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
+  const currentTime = Date.now()
+  const sessionStart = startTime || (chartData[0]?.timestamp || currentTime)
+  const sessionEnd = endTime || (sessionStart + 15 * 60 * 1000)
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        setDims({
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-        })
-      }
-    })
+  // Build render data with downsampling
+  const renderData = useMemo(() => downsampleData(chartData, MAX_RENDER_POINTS), [chartData])
 
-    resizeObserver.observe(container)
-    return () => resizeObserver.disconnect()
-  }, [])
+  // Current prices for the legend
+  const currentYesPrice = chartData.length > 0 ? chartData[chartData.length - 1].yesPrice : 0
+  const currentNoPrice = chartData.length > 0 ? chartData[chartData.length - 1].noPrice : 0
 
-  // Draw chart whenever data or dimensions change
-  useEffect(() => {
-    const canvas = canvasRef.current
-    if (!canvas || dims.width === 0 || dims.height === 0) return
+  if (chartData.length === 0) {
+    return (
+      <div className="w-full h-full flex items-center justify-center text-zinc-500 font-outfit text-sm">
+        Waiting for price data...
+      </div>
+    )
+  }
 
-    const ctx = canvas.getContext("2d")
-    if (!ctx) return
-
-    const w = dims.width
-    const h = dims.height
-    const renderData = downsampleData(chartData, MAX_RENDER_POINTS)
-
-    const dpr = window.devicePixelRatio || 1
-    canvas.width = w * dpr
-    canvas.height = h * dpr
-    ctx.scale(dpr, dpr)
-
-    const padding = { top: 30, right: 60, bottom: 25, left: 10 }
-    const chartWidth = w - padding.left - padding.right
-    const chartHeight = h - padding.top - padding.bottom
-
-    ctx.clearRect(0, 0, w, h)
-
-    if (chartData.length === 0) {
-      ctx.fillStyle = "#71717a"
-      ctx.font = "14px 'Outfit', sans-serif"
-      ctx.textAlign = "center"
-      ctx.fillText("Waiting for price data...", w / 2, h / 2)
-      return
-    }
-
-    const toY = (price: number) => padding.top + (1 - price) * chartHeight
-
-    const currentTime = Date.now()
-    const sessionStart = startTime || (chartData[0]?.timestamp || currentTime)
-    const sessionEnd = endTime || (sessionStart + 15 * 60 * 1000)
-    const sessionDuration = sessionEnd - sessionStart
-
-    const toX = (timestamp: number) => {
-      const elapsed = timestamp - sessionStart
-      const progress = Math.max(0, Math.min(1, elapsed / sessionDuration))
-      return padding.left + progress * chartWidth
-    }
-
-    const midY = toY(0.5)
-    const nowX = toX(currentTime)
-
-    // Background zones
-    const yesGradient = ctx.createLinearGradient(0, padding.top, 0, midY)
-    yesGradient.addColorStop(0, "rgba(52, 211, 153, 0.12)")
-    yesGradient.addColorStop(1, "rgba(52, 211, 153, 0.02)")
-    ctx.fillStyle = yesGradient
-    ctx.fillRect(padding.left, padding.top, chartWidth, midY - padding.top)
-
-    const noGradient = ctx.createLinearGradient(0, midY, 0, h - padding.bottom)
-    noGradient.addColorStop(0, "rgba(251, 113, 133, 0.02)")
-    noGradient.addColorStop(1, "rgba(251, 113, 133, 0.12)")
-    ctx.fillStyle = noGradient
-    ctx.fillRect(padding.left, midY, chartWidth, h - padding.bottom - midY)
-
-    // Grid lines
-    const gridLevels = [0, 0.25, 0.5, 0.75, 1.0]
-    ctx.strokeStyle = COLORS.grid
-    ctx.lineWidth = 1
-    for (const price of gridLevels) {
-      const y = toY(price)
-      ctx.beginPath()
-      ctx.moveTo(padding.left, y)
-      ctx.lineTo(w - padding.right, y)
-      ctx.stroke()
-    }
-
-    // 50c center line
-    ctx.strokeStyle = COLORS.midline
-    ctx.lineWidth = 2
-    ctx.setLineDash([8, 4])
-    ctx.beginPath()
-    ctx.moveTo(padding.left, midY)
-    ctx.lineTo(w - padding.right, midY)
-    ctx.stroke()
-    ctx.setLineDash([])
-
-    // Entry threshold line
-    const thresholdY = toY(threshold)
-    ctx.strokeStyle = COLORS.amber
-    ctx.lineWidth = 1
-    ctx.setLineDash([4, 4])
-    ctx.beginPath()
-    ctx.moveTo(padding.left, thresholdY)
-    ctx.lineTo(w - padding.right, thresholdY)
-    ctx.stroke()
-    ctx.setLineDash([])
-
-    const currentYesPrice = chartData[chartData.length - 1].yesPrice
-    const currentNoPrice = chartData[chartData.length - 1].noPrice
-
-    // Entry price line
-    if (entryPrice && entrySide) {
-      const entryY = toY(entryPrice)
-      const entryColor = entrySide === "YES" ? COLORS.yes : COLORS.no
-      ctx.strokeStyle = entryColor
-      ctx.lineWidth = 2
-      ctx.setLineDash([6, 4])
-      ctx.beginPath()
-      ctx.moveTo(padding.left, entryY)
-      ctx.lineTo(w - padding.right, entryY)
-      ctx.stroke()
-      ctx.setLineDash([])
-    }
-
-    // Future area
-    if (nowX < w - padding.right) {
-      ctx.fillStyle = "rgba(39, 39, 42, 0.5)"
-      ctx.fillRect(nowX, padding.top, w - padding.right - nowX, chartHeight)
-
-      ctx.strokeStyle = COLORS.cyan
-      ctx.lineWidth = 1
-      ctx.setLineDash([4, 4])
-      ctx.beginPath()
-      ctx.moveTo(nowX, padding.top)
-      ctx.lineTo(nowX, h - padding.bottom)
-      ctx.stroke()
-      ctx.setLineDash([])
-    }
-
-    // YES price line
-    if (renderData.length > 1) {
-      ctx.beginPath()
-      ctx.moveTo(toX(renderData[0].timestamp), toY(renderData[0].yesPrice))
-      for (let i = 1; i < renderData.length; i++) {
-        ctx.lineTo(toX(renderData[i].timestamp), toY(renderData[i].yesPrice))
-      }
-      ctx.strokeStyle = COLORS.yes
-      ctx.lineWidth = 2.5
-      ctx.stroke()
-    }
-
-    // NO price line
-    if (renderData.length > 1) {
-      ctx.beginPath()
-      ctx.moveTo(toX(renderData[0].timestamp), toY(renderData[0].noPrice))
-      for (let i = 1; i < renderData.length; i++) {
-        ctx.lineTo(toX(renderData[i].timestamp), toY(renderData[i].noPrice))
-      }
-      ctx.strokeStyle = COLORS.no
-      ctx.lineWidth = 2.5
-      ctx.stroke()
-    }
-
-    // Dots at key points
-    if (renderData.length > 0) {
-      const step = Math.max(1, Math.floor(renderData.length / 20))
-      ctx.fillStyle = COLORS.yes
-      for (let i = 0; i < renderData.length; i += step) {
-        const x = toX(renderData[i].timestamp)
-        const y = toY(renderData[i].yesPrice)
-        ctx.beginPath()
-        ctx.arc(x, y, 2.5, 0, Math.PI * 2)
-        ctx.fill()
-      }
-      ctx.fillStyle = COLORS.no
-      for (let i = 0; i < renderData.length; i += step) {
-        const x = toX(renderData[i].timestamp)
-        const y = toY(renderData[i].noPrice)
-        ctx.beginPath()
-        ctx.arc(x, y, 2.5, 0, Math.PI * 2)
-        ctx.fill()
-      }
-    }
-
-    // Fill markers
-    for (const fill of fills) {
-      const fillX = toX(fill.timestamp)
-      const fillY = toY(fill.price)
-      const fillColor = fill.side === "YES" ? COLORS.yes : COLORS.no
-
-      ctx.beginPath()
-      ctx.moveTo(fillX, fillY - 8)
-      ctx.lineTo(fillX - 6, fillY + 4)
-      ctx.lineTo(fillX + 6, fillY + 4)
-      ctx.closePath()
-      ctx.fillStyle = fillColor
-      ctx.fill()
-
-      ctx.strokeStyle = "#000"
-      ctx.lineWidth = 1
-      ctx.stroke()
-
-      if (fill.type === "HEDGE") {
-        ctx.fillStyle = COLORS.amber
-        ctx.font = "bold 8px 'Outfit', sans-serif"
-        ctx.textAlign = "center"
-        ctx.fillText("H", fillX, fillY - 12)
-      }
-    }
-
-    // Current price dots
-    const lastTick = chartData[chartData.length - 1]
-    const lastX = toX(lastTick.timestamp)
-    const lastYesY = toY(currentYesPrice)
-    const lastNoY = toY(currentNoPrice)
-
-    ctx.beginPath()
-    ctx.arc(lastX, lastYesY, 10, 0, Math.PI * 2)
-    ctx.fillStyle = COLORS.yes + "4D"
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(lastX, lastYesY, 6, 0, Math.PI * 2)
-    ctx.fillStyle = COLORS.yes
-    ctx.fill()
-
-    ctx.beginPath()
-    ctx.arc(lastX, lastNoY, 10, 0, Math.PI * 2)
-    ctx.fillStyle = COLORS.no + "4D"
-    ctx.fill()
-    ctx.beginPath()
-    ctx.arc(lastX, lastNoY, 6, 0, Math.PI * 2)
-    ctx.fillStyle = COLORS.no
-    ctx.fill()
-
-    // Y-axis labels
-    ctx.font = "11px 'JetBrains Mono', monospace"
-    ctx.textAlign = "left"
-
-    const labels = [
-      { price: 1.0, label: "100¢", color: COLORS.yes },
-      { price: 0.75, label: "75¢", color: COLORS.zinc },
-      { price: 0.5, label: "50¢", color: COLORS.midline },
-      { price: 0.25, label: "25¢", color: COLORS.zinc },
-      { price: 0, label: "0¢", color: COLORS.no },
-    ]
-
-    for (const { price, label, color } of labels) {
-      const y = toY(price)
-      ctx.fillStyle = color
-      ctx.fillText(label, w - padding.right + 8, y + 4)
-    }
-
-    // YES price label box
-    const yesLabel = formatPrice(currentYesPrice)
-    ctx.fillStyle = COLORS.yes
-    ctx.beginPath()
-    ctx.roundRect(w - padding.right + 4, lastYesY - 12, 52, 20, 4)
-    ctx.fill()
-    ctx.fillStyle = "#000"
-    ctx.font = "bold 11px 'JetBrains Mono', monospace"
-    ctx.textAlign = "left"
-    ctx.fillText(yesLabel, w - padding.right + 8, lastYesY + 3)
-
-    // NO price label box
-    const noLabel = formatPrice(currentNoPrice)
-    ctx.fillStyle = COLORS.no
-    ctx.beginPath()
-    ctx.roundRect(w - padding.right + 4, lastNoY - 12, 52, 20, 4)
-    ctx.fill()
-    ctx.fillStyle = "#000"
-    ctx.font = "bold 11px 'JetBrains Mono', monospace"
-    ctx.textAlign = "left"
-    ctx.fillText(noLabel, w - padding.right + 8, lastNoY + 3)
-
-    // Legend
-    ctx.font = "bold 11px 'Outfit', sans-serif"
-    ctx.textAlign = "left"
-
-    ctx.fillStyle = COLORS.yes
-    ctx.fillText("● YES", padding.left, 14)
-
-    ctx.fillStyle = COLORS.no
-    ctx.fillText("● NO", padding.left + 55, 14)
-
-    ctx.fillStyle = COLORS.amber
-    ctx.font = "11px 'Outfit', sans-serif"
-    ctx.fillText(`Entry: ${formatPrice(threshold)}`, padding.left + 100, 14)
-
-    if (entryPrice && entrySide) {
-      const posColor = entrySide === "YES" ? COLORS.yes : COLORS.no
-      ctx.fillStyle = posColor
-      ctx.fillText(`Position: ${entrySide} @ ${formatPrice(entryPrice)}`, padding.left + 180, 14)
-    }
-
-    // Zone labels
-    ctx.font = "bold 11px 'Outfit', sans-serif"
-    ctx.globalAlpha = 0.7
-
-    ctx.fillStyle = COLORS.yes
-    ctx.textAlign = "right"
-    ctx.fillText("▲ UP wins", w - padding.right - 8, padding.top + 16)
-
-    ctx.fillStyle = COLORS.no
-    ctx.fillText("▼ DOWN wins", w - padding.right - 8, h - padding.bottom - 8)
-
-    ctx.globalAlpha = 1
-
-    // Time labels
-    ctx.font = "10px 'JetBrains Mono', monospace"
-    ctx.fillStyle = COLORS.zinc
-    ctx.textAlign = "center"
-
-    const formatTime = (ts: number) => {
-      const d = new Date(ts)
-      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    }
-
-    const midTime = sessionStart + sessionDuration / 2
-
-    ctx.textAlign = "left"
-    ctx.fillText(formatTime(sessionStart), padding.left, h - 6)
-
-    ctx.textAlign = "center"
-    ctx.fillText(formatTime(midTime), padding.left + chartWidth / 2, h - 6)
-
-    ctx.textAlign = "right"
-    ctx.fillText(formatTime(sessionEnd), w - padding.right, h - 6)
-
-    // NOW label
-    if (nowX > padding.left && nowX < w - padding.right) {
-      ctx.fillStyle = COLORS.cyan
-      ctx.textAlign = "center"
-      ctx.font = "bold 9px 'Outfit', sans-serif"
-      ctx.fillText("NOW", nowX, h - 6)
-    }
-  }) // runs on every render - simple and correct
+  // X-axis ticks: start, mid, end
+  const midTime = sessionStart + (sessionEnd - sessionStart) / 2
+  const xTicks = [sessionStart, midTime, sessionEnd]
 
   return (
-    <div ref={containerRef} className="relative w-full h-full min-h-[200px]">
-      <canvas
-        ref={canvasRef}
-        style={{ width: dims.width || '100%', height: dims.height || '100%', display: 'block' }}
-      />
+    <div className="w-full h-full relative">
+      {/* Legend bar */}
+      <div className="absolute top-0 left-2 z-10 flex items-center gap-4 text-[11px] font-bold" style={{ fontFamily: "'Outfit', sans-serif" }}>
+        <span style={{ color: COLORS.yes }}>● YES</span>
+        <span style={{ color: COLORS.no }}>● NO</span>
+        <span className="font-normal" style={{ color: COLORS.amber }}>Entry: {formatPrice(threshold)}</span>
+        {entryPrice && entrySide && (
+          <span style={{ color: entrySide === "YES" ? COLORS.yes : COLORS.no }}>
+            Position: {entrySide} @ {formatPrice(entryPrice)}
+          </span>
+        )}
+      </div>
+
+      {/* Zone labels */}
+      <div className="absolute top-[30px] right-[65px] z-10 text-[11px] font-bold opacity-70" style={{ color: COLORS.yes, fontFamily: "'Outfit', sans-serif" }}>
+        ▲ UP wins
+      </div>
+      <div className="absolute bottom-[28px] right-[65px] z-10 text-[11px] font-bold opacity-70" style={{ color: COLORS.no, fontFamily: "'Outfit', sans-serif" }}>
+        ▼ DOWN wins
+      </div>
+
+      {/* Current price badges */}
+      <div className="absolute right-1 z-10 flex flex-col gap-1" style={{ top: "30px" }}>
+        <div className="rounded px-1.5 py-0.5 text-[11px] font-bold font-mono text-black" style={{ backgroundColor: COLORS.yes }}>
+          {formatPrice(currentYesPrice)}
+        </div>
+        <div className="rounded px-1.5 py-0.5 text-[11px] font-bold font-mono text-black" style={{ backgroundColor: COLORS.no }}>
+          {formatPrice(currentNoPrice)}
+        </div>
+      </div>
+
+      <ResponsiveContainer width="100%" height="100%">
+        <LineChart data={renderData} margin={{ top: 28, right: 60, bottom: 20, left: 8 }}>
+          {/* Background zones via ReferenceArea */}
+          <defs>
+            <linearGradient id="yesZone" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={COLORS.yes} stopOpacity={0.12} />
+              <stop offset="100%" stopColor={COLORS.yes} stopOpacity={0.02} />
+            </linearGradient>
+            <linearGradient id="noZone" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={COLORS.no} stopOpacity={0.02} />
+              <stop offset="100%" stopColor={COLORS.no} stopOpacity={0.12} />
+            </linearGradient>
+          </defs>
+
+          <ReferenceArea y1={0.5} y2={1.0} fill="url(#yesZone)" />
+          <ReferenceArea y1={0.0} y2={0.5} fill="url(#noZone)" />
+
+          {/* Future area (after NOW) */}
+          {currentTime < sessionEnd && (
+            <ReferenceArea x1={currentTime} x2={sessionEnd} fill="rgba(39, 39, 42, 0.5)" />
+          )}
+
+          <CartesianGrid stroke={COLORS.grid} strokeDasharray="" vertical={false} />
+
+          <XAxis
+            dataKey="timestamp"
+            type="number"
+            domain={[sessionStart, sessionEnd]}
+            ticks={xTicks}
+            tickFormatter={formatTime}
+            stroke="transparent"
+            tick={{ fill: COLORS.zinc, fontSize: 10, fontFamily: "'JetBrains Mono', monospace" }}
+            tickLine={false}
+          />
+
+          <YAxis
+            domain={[0, 1]}
+            ticks={[0, 0.25, 0.5, 0.75, 1.0]}
+            tickFormatter={(v: number) => `${Math.round(v * 100)}¢`}
+            orientation="right"
+            stroke="transparent"
+            tick={{ fill: COLORS.zinc, fontSize: 11, fontFamily: "'JetBrains Mono', monospace" }}
+            tickLine={false}
+            width={55}
+          />
+
+          {/* 50¢ midline */}
+          <ReferenceLine y={0.5} stroke={COLORS.midline} strokeWidth={2} strokeDasharray="8 4" />
+
+          {/* Entry threshold */}
+          <ReferenceLine y={threshold} stroke={COLORS.amber} strokeWidth={1} strokeDasharray="4 4" />
+
+          {/* Entry price line */}
+          {entryPrice && entrySide && (
+            <ReferenceLine
+              y={entryPrice}
+              stroke={entrySide === "YES" ? COLORS.yes : COLORS.no}
+              strokeWidth={2}
+              strokeDasharray="6 4"
+            />
+          )}
+
+          {/* NOW line */}
+          {currentTime > sessionStart && currentTime < sessionEnd && (
+            <ReferenceLine
+              x={currentTime}
+              stroke={COLORS.cyan}
+              strokeWidth={1}
+              strokeDasharray="4 4"
+              label={{ value: "NOW", position: "insideBottomLeft", fill: COLORS.cyan, fontSize: 9, fontWeight: "bold" }}
+            />
+          )}
+
+          <Tooltip content={<ChartTooltip />} />
+
+          {/* YES price line */}
+          <Line
+            type="monotone"
+            dataKey="yesPrice"
+            stroke={COLORS.yes}
+            strokeWidth={2.5}
+            dot={false}
+            activeDot={<GlowDot />}
+            isAnimationActive={false}
+          />
+
+          {/* NO price line */}
+          <Line
+            type="monotone"
+            dataKey="noPrice"
+            stroke={COLORS.no}
+            strokeWidth={2.5}
+            dot={false}
+            activeDot={<GlowDot />}
+            isAnimationActive={false}
+          />
+
+          {/* Fill markers as reference dots */}
+          {fills.map((fill, i) => (
+            <ReferenceLine
+              key={i}
+              x={fill.timestamp}
+              stroke="transparent"
+              label={({ viewBox }: { viewBox: { x: number; y: number } }) => {
+                // Calculate y position from price
+                const chartHeight = 250 - 28 - 20 // approx from margins
+                const cy = 28 + (1 - fill.price) * chartHeight
+                return <FillMarker cx={viewBox.x} cy={cy} fill={fill} />
+              }}
+            />
+          ))}
+        </LineChart>
+      </ResponsiveContainer>
     </div>
   )
 }
