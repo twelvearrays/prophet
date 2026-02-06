@@ -1027,9 +1027,11 @@ export function useLiveData() {
       )
     }
 
-    // Never replace history with fewer ticks than we already have
-    // (guards against polling starting before initial history fetch completes)
-    const mergedHistory = newHistory.length >= session.priceHistory.length
+    // Guard: never replace history with data that has less time coverage
+    // Check both length AND time span to prevent WS flooding from erasing backend history
+    const newSpan = newHistory.length >= 2 ? newHistory[newHistory.length - 1].timestamp - newHistory[0].timestamp : 0
+    const oldSpan = session.priceHistory.length >= 2 ? session.priceHistory[session.priceHistory.length - 1].timestamp - session.priceHistory[0].timestamp : 0
+    const mergedHistory = (newHistory.length >= session.priceHistory.length && newSpan >= oldSpan * 0.5)
       ? newHistory
       : [...session.priceHistory.slice(-199), tick]
 
@@ -1279,14 +1281,23 @@ export function useLiveData() {
         noLiquidity: 100,
       }
 
-      // Store in global history (shared across all sessions for this market)
+      // Store in global history - THROTTLED to prevent WS flooding
+      // WS fires hundreds of times/sec for popular markets like BTC.
+      // Without throttling, the 200-tick sliding window fills with WS-only
+      // ticks in seconds, pushing out all backend historical data.
       const existingHistory = priceHistoryRef.current.get(conditionId) || []
-      const newHistory = [...existingHistory.slice(-200), tick]
-      priceHistoryRef.current.set(conditionId, newHistory)
+      const lastHistTs = existingHistory.length > 0 ? existingHistory[existingHistory.length - 1].timestamp : 0
+      if (tick.timestamp - lastHistTs >= 500) {
+        const newHistory = [...existingHistory.slice(-200), tick]
+        priceHistoryRef.current.set(conditionId, newHistory)
+      }
 
+      // Always update session current tick (strategy needs every price update)
+      // but use the full history from ref (which preserves backend data)
+      const currentHistory = priceHistoryRef.current.get(conditionId) || [tick]
       setSessions(prev => prev.map(session => {
         if (session.marketId !== conditionId) return session
-        return processSessionTick(session, tick, newHistory)
+        return processSessionTick(session, tick, currentHistory)
       }))
     }
   }, [processSessionTick])
