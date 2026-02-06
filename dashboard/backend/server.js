@@ -255,10 +255,12 @@ function processOrderbook(data) {
     ? Math.max(...bids.map(b => parseFloat(b.price)))
     : null;
 
-  const liquidity = bids.slice(0, 5).reduce(
-    (sum, b) => sum + parseFloat(b.size) * parseFloat(b.price),
-    0
-  );
+  // Sort bids descending by price to get best levels first
+  const sortedBids = [...bids]
+    .map(b => ({ size: parseFloat(b.size), price: parseFloat(b.price) }))
+    .sort((a, b) => b.price - a.price)
+    .slice(0, 10);
+  const liquidity = sortedBids.reduce((sum, b) => sum + b.size * b.price, 0);
 
   const tick = {
     type: 'price',
@@ -296,17 +298,17 @@ function broadcastToSubscribers(tokenId, data) {
     // Get or create price entry for this market
     let prices = latestPrices.get(marketId);
     if (!prices) {
-      prices = { yesPrice: 0.5, noPrice: 0.5, yesLiquidity: 100, noLiquidity: 100, timestamp: 0 };
+      prices = { yesPrice: 0.5, noPrice: 0.5, yesLiquidity: 0, noLiquidity: 0, timestamp: 0 };
       latestPrices.set(marketId, prices);
     }
 
     // Update the appropriate side
     if (side === 'YES') {
       prices.yesPrice = data.bestAsk;
-      prices.yesLiquidity = data.liquidity || 100;
+      prices.yesLiquidity = data.liquidity ?? 0;
     } else {
       prices.noPrice = data.bestAsk;
-      prices.noLiquidity = data.liquidity || 100;
+      prices.noLiquidity = data.liquidity ?? 0;
     }
     prices.timestamp = data.timestamp;
 

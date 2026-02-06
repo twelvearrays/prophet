@@ -371,15 +371,17 @@ export class PolymarketClient {
         ? Math.max(...noBook.bids.map(b => parseFloat(b.price)))
         : 0;
 
-      // Liquidity = sum of top 5 bid levels (USD available)
-      const yesLiquidity = (yesBook.bids || []).slice(0, 5).reduce(
-        (sum, b) => sum + parseFloat(b.size) * parseFloat(b.price),
-        0
-      );
-      const noLiquidity = (noBook.bids || []).slice(0, 5).reduce(
-        (sum, b) => sum + parseFloat(b.size) * parseFloat(b.price),
-        0
-      );
+      // Liquidity = sum of top 10 bid levels (USD available), sorted by best price
+      const yesLiquidity = (yesBook.bids || [])
+        .map(b => ({ size: parseFloat(b.size), price: parseFloat(b.price) }))
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 10)
+        .reduce((sum, b) => sum + b.size * b.price, 0);
+      const noLiquidity = (noBook.bids || [])
+        .map(b => ({ size: parseFloat(b.size), price: parseFloat(b.price) }))
+        .sort((a, b) => b.price - a.price)
+        .slice(0, 10)
+        .reduce((sum, b) => sum + b.size * b.price, 0);
 
       return {
         timestamp: Date.now(),
