@@ -313,7 +313,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
               r={0}
               ifOverflow="extendDomain"
               shape={({ cx, cy }: { cx?: number; cy?: number }) => {
-                if (cx == null || cy == null) return null
+                if (cx == null || cy == null) return <g />
                 const color = fill.side === "YES" ? COLORS.yes : COLORS.no
                 const isYes = fill.side === "YES"
                 // Up triangle for YES, down triangle for NO

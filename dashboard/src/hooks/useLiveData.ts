@@ -1460,19 +1460,22 @@ export function useLiveData() {
         // Add new markets to ref
         newMarkets.forEach(m => marketsRef.current.set(m.conditionId, m))
 
-        // Update sessions
+        // Clean up expired market refs and price data
+        for (const expiredId of expiredIds) {
+          const expiredMarket = marketsRef.current.get(expiredId)
+          if (expiredMarket) {
+            // Clean up price history and price refs for expired tokens
+            priceHistoryRef.current.delete(expiredMarket.conditionId)
+            pricesRef.current.delete(expiredMarket.conditionId)
+            console.log(`[LIVE] Cleaned up price data for expired market ${expiredMarket.asset} (${expiredId.slice(0,8)}...)`)
+          }
+          marketsRef.current.delete(expiredId)
+        }
+
+        // Update sessions - remove expired, add new
         setSessions(prev => {
-          // Mark expired sessions as closed
-          let updated = prev.map(s => {
-            if (expiredIds.includes(s.marketId) && s.state !== "CLOSED") {
-              // For dual-entry, also set dualEntryState to CLOSED
-              if (s.strategyType === 'DUAL_ENTRY') {
-                return { ...s, state: "CLOSED" as const, dualEntryState: "CLOSED" as const }
-              }
-              return { ...s, state: "CLOSED" as const }
-            }
-            return s
-          })
+          // Remove sessions for expired markets entirely
+          let updated = prev.filter(s => !expiredIds.includes(s.marketId))
 
           // Add new sessions (flatMap because createSessionsFromMarket returns array)
           const newSessions = newMarkets.flatMap(createSessionsFromMarket)
@@ -1507,7 +1510,23 @@ export function useLiveData() {
           return updated
         })
 
-        // Note: Don't auto-change selection on refresh - let user keep their selection
+        // Reset selection if the selected session's market expired
+        if (expiredIds.length > 0) {
+          setSelectedSessionId(prev => {
+            if (!prev) return prev
+            // Check if selected session belongs to an expired market
+            const selectedSession = sessions.find(s => s.id === prev)
+            if (selectedSession && expiredIds.includes(selectedSession.marketId)) {
+              // Auto-select first session from a new or remaining market
+              const remaining = sessions.filter(s => !expiredIds.includes(s.marketId))
+              const newFirst = newMarkets[0]
+              if (newFirst) return newFirst.conditionId + '-mom'
+              if (remaining.length > 0) return remaining[0].id
+              return null
+            }
+            return prev
+          })
+        }
 
         // Subscribe to new tokens - handle WebSocket state
         if (newMarkets.length > 0) {
