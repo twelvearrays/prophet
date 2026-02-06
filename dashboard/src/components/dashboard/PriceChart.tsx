@@ -113,7 +113,7 @@ function PriceLabel({ viewBox, value, color }: { viewBox?: { x: number; y: numbe
   )
 }
 
-export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime, endTime, fills = [] }: PriceChartProps) {
+export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime: _startTime, endTime, fills = [] }: PriceChartProps) {
   // Chart-side accumulation: never let rendered data shrink
   const accumulatedRef = useRef<PriceTick[]>([])
   if (data.length >= accumulatedRef.current.length) {
@@ -128,8 +128,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   const chartData = accumulatedRef.current.length > 0 ? accumulatedRef.current : data
 
   const currentTime = Date.now()
-  const sessionStart = startTime || (chartData[0]?.timestamp || currentTime)
-  const sessionEnd = endTime || (sessionStart + 15 * 60 * 1000)
+  const sessionEnd = endTime || (currentTime + 15 * 60 * 1000)
 
   const renderData = useMemo(() => downsampleData(chartData, MAX_RENDER_POINTS), [chartData])
 
@@ -144,14 +143,19 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     )
   }
 
-  // Generate 5 evenly spaced time ticks
-  const duration = sessionEnd - sessionStart
+  // X-axis domain: start from first data point, end at session end
+  // This ensures data always fills the left side of the chart and grows rightward
+  const dataStart = chartData[0].timestamp
+  const xDomainStart = dataStart
+  const xDomainEnd = sessionEnd
+
+  // Generate 4 evenly spaced time ticks
+  const duration = xDomainEnd - xDomainStart
   const xTicks = [
-    sessionStart,
-    sessionStart + duration * 0.25,
-    sessionStart + duration * 0.5,
-    sessionStart + duration * 0.75,
-    sessionEnd,
+    xDomainStart,
+    xDomainStart + duration * 0.33,
+    xDomainStart + duration * 0.66,
+    xDomainEnd,
   ]
 
   return (
@@ -195,7 +199,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
           <XAxis
             dataKey="timestamp"
             type="number"
-            domain={[sessionStart, sessionEnd]}
+            domain={[xDomainStart, xDomainEnd]}
             ticks={xTicks}
             tickFormatter={formatTime}
             stroke="transparent"
@@ -255,7 +259,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
           />
 
           {/* NOW line */}
-          {currentTime > sessionStart && currentTime < sessionEnd && (
+          {currentTime > xDomainStart && currentTime < sessionEnd && (
             <ReferenceLine
               x={currentTime}
               stroke={COLORS.cyan}
