@@ -882,15 +882,19 @@ app.get('/api/price/:yesTokenId/:noTokenId', async (req, res) => {
       ? Math.max(...noBook.bids.map(b => parseFloat(b.price)))
       : 0;
 
-    // Liquidity = sum of top 5 bid levels
-    const yesLiquidity = (yesBook.bids || []).slice(0, 5).reduce(
-      (sum, b) => sum + parseFloat(b.size) * parseFloat(b.price),
-      0
-    );
-    const noLiquidity = (noBook.bids || []).slice(0, 5).reduce(
-      (sum, b) => sum + parseFloat(b.size) * parseFloat(b.price),
-      0
-    );
+    // Liquidity = sum of top 10 bid levels by price (sorted descending)
+    // CLOB API doesn't guarantee sort order, so we sort first
+    const yesBids = (yesBook.bids || [])
+      .map(b => ({ size: parseFloat(b.size), price: parseFloat(b.price) }))
+      .sort((a, b) => b.price - a.price)
+      .slice(0, 10);
+    const yesLiquidity = yesBids.reduce((sum, b) => sum + b.size * b.price, 0);
+
+    const noBids = (noBook.bids || [])
+      .map(b => ({ size: parseFloat(b.size), price: parseFloat(b.price) }))
+      .sort((a, b) => b.price - a.price)
+      .slice(0, 10);
+    const noLiquidity = noBids.reduce((sum, b) => sum + b.size * b.price, 0);
 
     const priceData = {
       timestamp: Date.now(),
