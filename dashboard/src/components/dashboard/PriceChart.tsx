@@ -55,7 +55,6 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   const startTimeRef = useRef(startTime)
   const endTimeRef = useRef(endTime)
   const fillsRef = useRef(fills)
-  const dimensionsRef = useRef({ width: 0, height: 0 })
 
   // Update refs on every render and flag that we need a repaint
   dataRef.current = data
@@ -69,8 +68,12 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
 
   const doRender = useCallback(() => {
     const canvas = canvasRef.current
-    const dims = dimensionsRef.current
-    if (!canvas || dims.width === 0) return
+    if (!canvas) return
+
+    // Read dimensions directly from the DOM (CSS controls display size)
+    const w = canvas.clientWidth
+    const h = canvas.clientHeight
+    if (w === 0 || h === 0) return
 
     const ctx = canvas.getContext("2d")
     if (!ctx) return
@@ -86,22 +89,22 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     const renderData = downsampleData(currentData, MAX_RENDER_POINTS)
 
     const dpr = window.devicePixelRatio || 1
-    canvas.width = dims.width * dpr
-    canvas.height = dims.height * dpr
+    canvas.width = w * dpr
+    canvas.height = h * dpr
     ctx.scale(dpr, dpr)
 
     const padding = { top: 30, right: 60, bottom: 25, left: 10 }
-    const chartWidth = dims.width - padding.left - padding.right
-    const chartHeight = dims.height - padding.top - padding.bottom
+    const chartWidth = w - padding.left - padding.right
+    const chartHeight = h - padding.top - padding.bottom
 
     ctx.fillStyle = "transparent"
-    ctx.fillRect(0, 0, dims.width, dims.height)
+    ctx.fillRect(0, 0, w, h)
 
     if (currentData.length === 0) {
       ctx.fillStyle = "#71717a"
       ctx.font = "14px 'Outfit', sans-serif"
       ctx.textAlign = "center"
-      ctx.fillText("Waiting for price data...", dims.width / 2, dims.height / 2)
+      ctx.fillText("Waiting for price data...", w / 2, h / 2)
       return
     }
 
@@ -128,11 +131,11 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.fillStyle = yesGradient
     ctx.fillRect(padding.left, padding.top, chartWidth, midY - padding.top)
 
-    const noGradient = ctx.createLinearGradient(0, midY, 0, dims.height - padding.bottom)
+    const noGradient = ctx.createLinearGradient(0, midY, 0, h - padding.bottom)
     noGradient.addColorStop(0, "rgba(251, 113, 133, 0.02)")
     noGradient.addColorStop(1, "rgba(251, 113, 133, 0.12)")
     ctx.fillStyle = noGradient
-    ctx.fillRect(padding.left, midY, chartWidth, dims.height - padding.bottom - midY)
+    ctx.fillRect(padding.left, midY, chartWidth, h - padding.bottom - midY)
 
     // Grid lines
     const gridLevels = [0, 0.25, 0.5, 0.75, 1.0]
@@ -142,7 +145,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
       const y = toY(price)
       ctx.beginPath()
       ctx.moveTo(padding.left, y)
-      ctx.lineTo(dims.width - padding.right, y)
+      ctx.lineTo(w - padding.right, y)
       ctx.stroke()
     }
 
@@ -152,7 +155,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.setLineDash([8, 4])
     ctx.beginPath()
     ctx.moveTo(padding.left, midY)
-    ctx.lineTo(dims.width - padding.right, midY)
+    ctx.lineTo(w - padding.right, midY)
     ctx.stroke()
     ctx.setLineDash([])
 
@@ -163,7 +166,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.setLineDash([4, 4])
     ctx.beginPath()
     ctx.moveTo(padding.left, thresholdY)
-    ctx.lineTo(dims.width - padding.right, thresholdY)
+    ctx.lineTo(w - padding.right, thresholdY)
     ctx.stroke()
     ctx.setLineDash([])
 
@@ -179,22 +182,22 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
       ctx.setLineDash([6, 4])
       ctx.beginPath()
       ctx.moveTo(padding.left, entryY)
-      ctx.lineTo(dims.width - padding.right, entryY)
+      ctx.lineTo(w - padding.right, entryY)
       ctx.stroke()
       ctx.setLineDash([])
     }
 
     // Future area
-    if (nowX < dims.width - padding.right) {
+    if (nowX < w - padding.right) {
       ctx.fillStyle = "rgba(39, 39, 42, 0.5)"
-      ctx.fillRect(nowX, padding.top, dims.width - padding.right - nowX, chartHeight)
+      ctx.fillRect(nowX, padding.top, w - padding.right - nowX, chartHeight)
 
       ctx.strokeStyle = COLORS.cyan
       ctx.lineWidth = 1
       ctx.setLineDash([4, 4])
       ctx.beginPath()
       ctx.moveTo(nowX, padding.top)
-      ctx.lineTo(nowX, dims.height - padding.bottom)
+      ctx.lineTo(nowX, h - padding.bottom)
       ctx.stroke()
       ctx.setLineDash([])
     }
@@ -309,30 +312,30 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     for (const { price, label, color } of labels) {
       const y = toY(price)
       ctx.fillStyle = color
-      ctx.fillText(label, dims.width - padding.right + 8, y + 4)
+      ctx.fillText(label, w - padding.right + 8, y + 4)
     }
 
     // YES price label box
     const yesLabel = formatPrice(currentYesPrice)
     ctx.fillStyle = COLORS.yes
     ctx.beginPath()
-    ctx.roundRect(dims.width - padding.right + 4, lastYesY - 12, 52, 20, 4)
+    ctx.roundRect(w - padding.right + 4, lastYesY - 12, 52, 20, 4)
     ctx.fill()
     ctx.fillStyle = "#000"
     ctx.font = "bold 11px 'JetBrains Mono', monospace"
     ctx.textAlign = "left"
-    ctx.fillText(yesLabel, dims.width - padding.right + 8, lastYesY + 3)
+    ctx.fillText(yesLabel, w - padding.right + 8, lastYesY + 3)
 
     // NO price label box
     const noLabel = formatPrice(currentNoPrice)
     ctx.fillStyle = COLORS.no
     ctx.beginPath()
-    ctx.roundRect(dims.width - padding.right + 4, lastNoY - 12, 52, 20, 4)
+    ctx.roundRect(w - padding.right + 4, lastNoY - 12, 52, 20, 4)
     ctx.fill()
     ctx.fillStyle = "#000"
     ctx.font = "bold 11px 'JetBrains Mono', monospace"
     ctx.textAlign = "left"
-    ctx.fillText(noLabel, dims.width - padding.right + 8, lastNoY + 3)
+    ctx.fillText(noLabel, w - padding.right + 8, lastNoY + 3)
 
     // Legend
     ctx.font = "bold 11px 'Outfit', sans-serif"
@@ -360,10 +363,10 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
 
     ctx.fillStyle = COLORS.yes
     ctx.textAlign = "right"
-    ctx.fillText("▲ UP wins", dims.width - padding.right - 8, padding.top + 16)
+    ctx.fillText("▲ UP wins", w - padding.right - 8, padding.top + 16)
 
     ctx.fillStyle = COLORS.no
-    ctx.fillText("▼ DOWN wins", dims.width - padding.right - 8, dims.height - padding.bottom - 8)
+    ctx.fillText("▼ DOWN wins", w - padding.right - 8, h - padding.bottom - 8)
 
     ctx.globalAlpha = 1
 
@@ -380,20 +383,20 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     const midTime = sessionStart + sessionDuration / 2
 
     ctx.textAlign = "left"
-    ctx.fillText(formatTime(sessionStart), padding.left, dims.height - 6)
+    ctx.fillText(formatTime(sessionStart), padding.left, h - 6)
 
     ctx.textAlign = "center"
-    ctx.fillText(formatTime(midTime), padding.left + chartWidth / 2, dims.height - 6)
+    ctx.fillText(formatTime(midTime), padding.left + chartWidth / 2, h - 6)
 
     ctx.textAlign = "right"
-    ctx.fillText(formatTime(sessionEnd), dims.width - padding.right, dims.height - 6)
+    ctx.fillText(formatTime(sessionEnd), w - padding.right, h - 6)
 
     // NOW label
-    if (nowX > padding.left && nowX < dims.width - padding.right) {
+    if (nowX > padding.left && nowX < w - padding.right) {
       ctx.fillStyle = COLORS.cyan
       ctx.textAlign = "center"
       ctx.font = "bold 9px 'Outfit', sans-serif"
-      ctx.fillText("NOW", nowX, dims.height - 6)
+      ctx.fillText("NOW", nowX, h - 6)
     }
   }, [])
 
@@ -418,19 +421,13 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     }
   }, [doRender])
 
-  // ResizeObserver - updates dimensions ref and flags repaint
+  // ResizeObserver - flags repaint when container resizes
   useEffect(() => {
     const container = containerRef.current
     if (!container) return
 
-    const resizeObserver = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        dimensionsRef.current = {
-          width: entry.contentRect.width,
-          height: entry.contentRect.height,
-        }
-        needsRenderRef.current = true
-      }
+    const resizeObserver = new ResizeObserver(() => {
+      needsRenderRef.current = true
     })
 
     resizeObserver.observe(container)
@@ -441,7 +438,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     <div ref={containerRef} className="w-full h-full min-h-[200px]">
       <canvas
         ref={canvasRef}
-        style={{ width: dimensionsRef.current.width, height: dimensionsRef.current.height }}
+        className="block w-full h-full"
       />
     </div>
   )

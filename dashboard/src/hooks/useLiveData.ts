@@ -1593,10 +1593,14 @@ export function useLiveData() {
 
                 setSessions(prev => prev.map(session => {
                   if (session.marketId !== market.conditionId) return session
+                  // Guard: never replace history with fewer ticks
+                  const safeHistory = combinedHistory.length >= session.priceHistory.length
+                    ? combinedHistory
+                    : [...session.priceHistory.slice(-199), tick]
                   return {
                     ...session,
                     currentTick: tick,
-                    priceHistory: combinedHistory,
+                    priceHistory: safeHistory,
                   }
                 }))
 
@@ -1726,10 +1730,14 @@ export function useLiveData() {
 
               setSessions(prev => prev.map(session => {
                 if (session.marketId !== market.conditionId) return session
+                // Guard: never replace history with fewer ticks
+                const safeHistory = combinedHistory.length >= session.priceHistory.length
+                  ? combinedHistory
+                  : [...session.priceHistory.slice(-199), tick]
                 return {
                   ...session,
                   currentTick: tick,
-                  priceHistory: combinedHistory,
+                  priceHistory: safeHistory,
                 }
               }))
 
