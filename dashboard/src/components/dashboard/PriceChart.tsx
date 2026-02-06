@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react"
+import { useEffect, useRef, useState } from "react"
 import type { PriceTick } from "@/types"
 import { formatPrice } from "@/lib/utils"
 
@@ -44,16 +44,13 @@ const MAX_RENDER_POINTS = 100
 export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, startTime, endTime, fills = [] }: PriceChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
-  const rafRef = useRef<number>(0)
-  const needsRenderRef = useRef(true)
+  const [dims, setDims] = useState({ width: 0, height: 0 })
 
   // Chart-side accumulation: never let rendered data shrink
-  // This makes the chart immune to data layer race conditions
   const accumulatedRef = useRef<PriceTick[]>([])
   if (data.length >= accumulatedRef.current.length) {
     accumulatedRef.current = data
   } else if (data.length > 0) {
-    // Data shrunk (race condition) - keep accumulated + append latest tick
     const lastTick = data[data.length - 1]
     const lastAccTs = accumulatedRef.current[accumulatedRef.current.length - 1]?.timestamp || 0
     if (lastTick.timestamp > lastAccTs) {
@@ -62,46 +59,35 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   }
   const chartData = accumulatedRef.current.length > 0 ? accumulatedRef.current : data
 
-  // Store all props in refs so the render callback always sees current values
-  const dataRef = useRef(chartData)
-  const entryPriceRef = useRef(entryPrice)
-  const entrySideRef = useRef(entrySide)
-  const thresholdRef = useRef(threshold)
-  const startTimeRef = useRef(startTime)
-  const endTimeRef = useRef(endTime)
-  const fillsRef = useRef(fills)
+  // ResizeObserver updates dimensions via state (triggers re-render)
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container) return
 
-  // Update refs on every render and flag that we need a repaint
-  dataRef.current = chartData
-  entryPriceRef.current = entryPrice
-  entrySideRef.current = entrySide
-  thresholdRef.current = threshold
-  startTimeRef.current = startTime
-  endTimeRef.current = endTime
-  fillsRef.current = fills
-  needsRenderRef.current = true
+    const resizeObserver = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        setDims({
+          width: entry.contentRect.width,
+          height: entry.contentRect.height,
+        })
+      }
+    })
 
-  const doRender = useCallback(() => {
+    resizeObserver.observe(container)
+    return () => resizeObserver.disconnect()
+  }, [])
+
+  // Draw chart whenever data or dimensions change
+  useEffect(() => {
     const canvas = canvasRef.current
-    if (!canvas) return
-
-    // Read dimensions directly from the DOM (CSS controls display size)
-    const w = canvas.clientWidth
-    const h = canvas.clientHeight
-    if (w === 0 || h === 0) return
+    if (!canvas || dims.width === 0 || dims.height === 0) return
 
     const ctx = canvas.getContext("2d")
     if (!ctx) return
 
-    // Read current values from refs - never stale
-    const currentData = dataRef.current
-    const currentEntryPrice = entryPriceRef.current
-    const currentEntrySide = entrySideRef.current
-    const currentThreshold = thresholdRef.current
-    const currentStartTime = startTimeRef.current
-    const currentEndTime = endTimeRef.current
-    const currentFills = fillsRef.current
-    const renderData = downsampleData(currentData, MAX_RENDER_POINTS)
+    const w = dims.width
+    const h = dims.height
+    const renderData = downsampleData(chartData, MAX_RENDER_POINTS)
 
     const dpr = window.devicePixelRatio || 1
     canvas.width = w * dpr
@@ -112,10 +98,9 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     const chartWidth = w - padding.left - padding.right
     const chartHeight = h - padding.top - padding.bottom
 
-    ctx.fillStyle = "transparent"
-    ctx.fillRect(0, 0, w, h)
+    ctx.clearRect(0, 0, w, h)
 
-    if (currentData.length === 0) {
+    if (chartData.length === 0) {
       ctx.fillStyle = "#71717a"
       ctx.font = "14px 'Outfit', sans-serif"
       ctx.textAlign = "center"
@@ -126,8 +111,8 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     const toY = (price: number) => padding.top + (1 - price) * chartHeight
 
     const currentTime = Date.now()
-    const sessionStart = currentStartTime || (currentData[0]?.timestamp || currentTime)
-    const sessionEnd = currentEndTime || (sessionStart + 15 * 60 * 1000)
+    const sessionStart = startTime || (chartData[0]?.timestamp || currentTime)
+    const sessionEnd = endTime || (sessionStart + 15 * 60 * 1000)
     const sessionDuration = sessionEnd - sessionStart
 
     const toX = (timestamp: number) => {
@@ -175,7 +160,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.setLineDash([])
 
     // Entry threshold line
-    const thresholdY = toY(currentThreshold)
+    const thresholdY = toY(threshold)
     ctx.strokeStyle = COLORS.amber
     ctx.lineWidth = 1
     ctx.setLineDash([4, 4])
@@ -185,13 +170,13 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     ctx.stroke()
     ctx.setLineDash([])
 
-    const currentYesPrice = currentData[currentData.length - 1].yesPrice
-    const currentNoPrice = currentData[currentData.length - 1].noPrice
+    const currentYesPrice = chartData[chartData.length - 1].yesPrice
+    const currentNoPrice = chartData[chartData.length - 1].noPrice
 
     // Entry price line
-    if (currentEntryPrice && currentEntrySide) {
-      const entryY = toY(currentEntryPrice)
-      const entryColor = currentEntrySide === "YES" ? COLORS.yes : COLORS.no
+    if (entryPrice && entrySide) {
+      const entryY = toY(entryPrice)
+      const entryColor = entrySide === "YES" ? COLORS.yes : COLORS.no
       ctx.strokeStyle = entryColor
       ctx.lineWidth = 2
       ctx.setLineDash([6, 4])
@@ -263,7 +248,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     }
 
     // Fill markers
-    for (const fill of currentFills) {
+    for (const fill of fills) {
       const fillX = toX(fill.timestamp)
       const fillY = toY(fill.price)
       const fillColor = fill.side === "YES" ? COLORS.yes : COLORS.no
@@ -289,7 +274,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
     }
 
     // Current price dots
-    const lastTick = currentData[currentData.length - 1]
+    const lastTick = chartData[chartData.length - 1]
     const lastX = toX(lastTick.timestamp)
     const lastYesY = toY(currentYesPrice)
     const lastNoY = toY(currentNoPrice)
@@ -364,12 +349,12 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
 
     ctx.fillStyle = COLORS.amber
     ctx.font = "11px 'Outfit', sans-serif"
-    ctx.fillText(`Entry: ${formatPrice(currentThreshold)}`, padding.left + 100, 14)
+    ctx.fillText(`Entry: ${formatPrice(threshold)}`, padding.left + 100, 14)
 
-    if (currentEntryPrice && currentEntrySide) {
-      const posColor = currentEntrySide === "YES" ? COLORS.yes : COLORS.no
+    if (entryPrice && entrySide) {
+      const posColor = entrySide === "YES" ? COLORS.yes : COLORS.no
       ctx.fillStyle = posColor
-      ctx.fillText(`Position: ${currentEntrySide} @ ${formatPrice(currentEntryPrice)}`, padding.left + 180, 14)
+      ctx.fillText(`Position: ${entrySide} @ ${formatPrice(entryPrice)}`, padding.left + 180, 14)
     }
 
     // Zone labels
@@ -413,52 +398,14 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
       ctx.font = "bold 9px 'Outfit', sans-serif"
       ctx.fillText("NOW", nowX, h - 6)
     }
-  }, [])
-
-  // rAF loop: only paints when needsRenderRef is flagged
-  useEffect(() => {
-    let running = true
-
-    function tick() {
-      if (!running) return
-      if (needsRenderRef.current) {
-        needsRenderRef.current = false
-        doRender()
-      }
-      rafRef.current = requestAnimationFrame(tick)
-    }
-
-    rafRef.current = requestAnimationFrame(tick)
-
-    return () => {
-      running = false
-      cancelAnimationFrame(rafRef.current)
-    }
-  }, [doRender])
-
-  // ResizeObserver - flags repaint when container resizes
-  useEffect(() => {
-    const container = containerRef.current
-    if (!container) return
-
-    const resizeObserver = new ResizeObserver(() => {
-      needsRenderRef.current = true
-    })
-
-    resizeObserver.observe(container)
-    return () => resizeObserver.disconnect()
-  }, [])
+  }) // runs on every render - simple and correct
 
   return (
     <div ref={containerRef} className="relative w-full h-full min-h-[200px]">
       <canvas
         ref={canvasRef}
-        className="block w-full h-full"
+        style={{ width: dims.width || '100%', height: dims.height || '100%', display: 'block' }}
       />
-      {/* Diagnostic overlay - shows data flow health */}
-      <div className="absolute top-0 right-0 bg-black/70 text-[10px] font-mono text-zinc-400 px-1.5 py-0.5 rounded-bl z-10">
-        prop:{data.length} acc:{accumulatedRef.current.length} chart:{chartData.length}
-      </div>
     </div>
   )
 }
