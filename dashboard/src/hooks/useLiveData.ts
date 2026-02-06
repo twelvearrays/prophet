@@ -1033,6 +1033,11 @@ export function useLiveData() {
       ? newHistory
       : [...session.priceHistory.slice(-199), tick]
 
+    // DIAGNOSTIC: Log priceHistory flow every 10 ticks
+    if (mergedHistory.length % 10 === 1) {
+      console.log(`[CHART-DATA] ${session.asset}-${session.strategyType} | newHistory=${newHistory.length} session=${session.priceHistory.length} → merged=${mergedHistory.length}`)
+    }
+
     let updated: TradingSession = {
       ...session,
       currentTick: tick,

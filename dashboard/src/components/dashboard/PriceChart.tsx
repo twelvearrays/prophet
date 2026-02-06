@@ -47,8 +47,23 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   const rafRef = useRef<number>(0)
   const needsRenderRef = useRef(true)
 
+  // Chart-side accumulation: never let rendered data shrink
+  // This makes the chart immune to data layer race conditions
+  const accumulatedRef = useRef<PriceTick[]>([])
+  if (data.length >= accumulatedRef.current.length) {
+    accumulatedRef.current = data
+  } else if (data.length > 0) {
+    // Data shrunk (race condition) - keep accumulated + append latest tick
+    const lastTick = data[data.length - 1]
+    const lastAccTs = accumulatedRef.current[accumulatedRef.current.length - 1]?.timestamp || 0
+    if (lastTick.timestamp > lastAccTs) {
+      accumulatedRef.current = [...accumulatedRef.current, lastTick].slice(-200)
+    }
+  }
+  const chartData = accumulatedRef.current.length > 0 ? accumulatedRef.current : data
+
   // Store all props in refs so the render callback always sees current values
-  const dataRef = useRef(data)
+  const dataRef = useRef(chartData)
   const entryPriceRef = useRef(entryPrice)
   const entrySideRef = useRef(entrySide)
   const thresholdRef = useRef(threshold)
@@ -57,7 +72,7 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   const fillsRef = useRef(fills)
 
   // Update refs on every render and flag that we need a repaint
-  dataRef.current = data
+  dataRef.current = chartData
   entryPriceRef.current = entryPrice
   entrySideRef.current = entrySide
   thresholdRef.current = threshold
@@ -435,11 +450,15 @@ export function PriceChart({ data, entryPrice, entrySide, threshold = 0.65, star
   }, [])
 
   return (
-    <div ref={containerRef} className="w-full h-full min-h-[200px]">
+    <div ref={containerRef} className="relative w-full h-full min-h-[200px]">
       <canvas
         ref={canvasRef}
         className="block w-full h-full"
       />
+      {/* Diagnostic overlay - shows data flow health */}
+      <div className="absolute top-0 right-0 bg-black/70 text-[10px] font-mono text-zinc-400 px-1.5 py-0.5 rounded-bl z-10">
+        prop:{data.length} acc:{accumulatedRef.current.length} chart:{chartData.length}
+      </div>
     </div>
   )
 }
